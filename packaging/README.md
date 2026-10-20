@@ -71,7 +71,13 @@ by NSIS, even for paths containing spaces), then require the app and uninstaller
 at that exact destination. Each payload gets a fresh sample-library database.
 DMG verification retries only the exact observed resource-unavailable diagnostic,
 up to three times with 2s/5s delays; unknown/corrupt/changed images still fail.
-Screenshots, installer paths and DMG attempt logs survive failed checks.
+ARM runners can leave a freshly created DMG attached to its creation helper.
+Before calculating checksums, packaging matches only that artifact's canonical
+path in `hdiutil info -plist`, selects its unique partition-map parent, and
+normally detaches it. Other images are never detached, force flags are never
+used, and ambiguous inventories or persistent failures stop packaging. Full
+checksum verification still follows. Screenshots, installer paths, attachment
+inventories and DMG attempt logs survive failed checks.
 
 ## Signing
 

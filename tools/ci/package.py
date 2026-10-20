@@ -11,6 +11,7 @@ import tarfile
 import zipfile
 
 from dependencies import ROOT, LOCK, download
+from verification import finalize_created_dmg
 
 TARGETS = {
     "mac-arm64": "macos-arm64",
@@ -121,7 +122,11 @@ def mac_package(stage, out, name, qt):
     dmg_root.mkdir()
     shutil.copytree(app, dmg_root / app.name, symlinks=True)
     (dmg_root / "Applications").symlink_to("/Applications")
-    run("hdiutil", "create", "-volname", "Stacks", "-srcfolder", dmg_root, "-format", "UDZO", out / f"{name}.dmg")
+    image = out / f"{name}.dmg"
+    run("hdiutil", "create", "-volname", "Stacks", "-srcfolder", dmg_root, "-format", "UDZO", image)
+    # ARM runners can leave the creation device attached after hdiutil exits.
+    # Finalize that exact owned image before package() computes SHA256 files.
+    finalize_created_dmg(image, ROOT / "build/package-smoke")
 
 
 def windows_package(stage, out, name, qt, version):

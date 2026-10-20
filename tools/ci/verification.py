@@ -2,6 +2,8 @@
 import hashlib
 import json
 from pathlib import Path
+import plistlib
+import re
 import subprocess
 import os
 import time
@@ -36,6 +38,81 @@ def dmg_diagnostics(image, directory):
         except (OSError, subprocess.TimeoutExpired) as error:
             output = repr(error)
         (directory / f"dmg-{name}.log").write_text(output, encoding="utf-8")
+
+
+def created_image_record(image, info):
+    """Find only this freshly-created artifact, never an unrelated mount."""
+    entries = info.get("images", [])
+    if any(not isinstance(entry, dict) or not isinstance(entry.get("image-path"), str)
+           or not Path(entry["image-path"]).is_absolute() for entry in entries):
+        raise RuntimeError("Malformed disk-image attachment path")
+    records = [entry for entry in entries if Path(entry["image-path"]).resolve() == image]
+    if len(records) > 1:
+        raise RuntimeError("Created DMG has ambiguous multiple attachments")
+    return records[0] if records else None
+
+
+def created_image_device(record):
+    # APFS images include a second synthesized whole disk. Prefer the unique
+    # partition-map parent; never guess between multiple whole-device entries.
+    entities = record.get("system-entities", record.get("dev-entries", []))
+    whole = [entry for entry in entities if re.fullmatch(r"/dev/disk[0-9]+", entry.get("dev-entry", ""))]
+    parents = [entry for entry in whole if entry.get("content-hint") in
+               {"GUID_partition_scheme", "FDisk_partition_scheme", "Apple_partition_scheme"}]
+    if len(parents) == 1:
+        return parents[0]["dev-entry"]
+    raise RuntimeError("Cannot identify a unique whole device for the created DMG")
+
+
+def finalize_created_dmg(image, directory):
+    """Detach only our own lingering creation attachment, before hashing it."""
+    image, directory = Path(image).resolve(strict=True), Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    inventory_count = 0
+    def image_info():
+        nonlocal inventory_count
+        inventory_count += 1
+        log = directory / f"dmg-inventory-{inventory_count}"
+        try:
+            result = subprocess.run(["hdiutil", "info", "-plist"], check=True,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        except (OSError, subprocess.SubprocessError) as error:
+            log.with_suffix(".log").write_text(repr(error), encoding="utf-8")
+            raise
+        log.with_suffix(".plist").write_bytes(result.stdout)
+        info = plistlib.loads(result.stdout)
+        if not isinstance(info, dict) or not isinstance(info.get("images"), list):
+            raise RuntimeError("Malformed disk-image attachment inventory")
+        return info
+    for attempt in range(3):
+        record = created_image_record(image, image_info())
+        if record is None:
+            return
+        device = created_image_device(record)
+        print(f"Finalizing our created DMG: detach {device} ({image})", flush=True)
+        command = ["hdiutil", "detach", device] # Deliberately no force flag.
+        try:
+            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, errors="replace", timeout=60)
+        except (OSError, subprocess.SubprocessError) as error:
+            (directory / f"dmg-finalize-{attempt + 1}.json").write_text(
+                json.dumps({"image": str(image), "device": device, "attachment": record,
+                            "error": repr(error)}, indent=2, default=str), encoding="utf-8")
+            raise
+        (directory / f"dmg-finalize-{attempt + 1}.json").write_text(
+            json.dumps({"image": str(image), "device": device, "attachment": record,
+                        "exit_code": result.returncode, "output": result.stdout}, indent=2, default=str), encoding="utf-8")
+        # Re-query the artifact, not the old device number: a disappearing helper
+        # or a reused disk number must not authorize detaching another image.
+        if created_image_record(image, image_info()) is None:
+            return
+        if result.returncode and not any(term in (result.stdout or "").lower()
+                                          for term in ("resource busy", "resource temporarily unavailable")):
+            raise subprocess.CalledProcessError(result.returncode, command, output=result.stdout)
+        if attempt == 2:
+            raise RuntimeError("Created DMG remains attached after bounded ordinary detach attempts")
+        time.sleep((2, 5)[attempt])
+    raise AssertionError("unreachable")
 
 
 def verify_dmg(image, directory):
