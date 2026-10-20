@@ -1,6 +1,6 @@
 import QtQuick
 import QtQuick.Controls
-import "Theme.js" as Theme
+import "."
 
 Item {
     id: overlay
@@ -26,10 +26,11 @@ Item {
 
     Rectangle {
         anchors.fill: parent
-        color: "#B3000000"
+        color: Theme.scrim
         MouseArea {
             anchors.fill: parent
             onClicked: overlay.close()
+            onWheel: function(wheel) { wheel.accepted = true } // The desk below stays put.
         }
     }
 
@@ -56,13 +57,24 @@ Item {
         Rectangle {
             anchors.fill: parent
             anchors.topMargin: 10
+            anchors.bottomMargin: -8
+            anchors.leftMargin: 8
+            anchors.rightMargin: 8
             radius: 16
-            color: "#55000000"
+            color: Theme.deepShadow
             z: -1
+        }
+
+        // Clicks on the panel's empty space must not reach the scrim, which
+        // would close the palette.
+        MouseArea {
+            anchors.fill: parent
+            onWheel: function(wheel) { wheel.accepted = true }
         }
 
         Column {
             anchors.fill: parent
+            anchors.margins: parent.border.width // Rows and panes stop inside the border.
             spacing: 0
 
             // ── Query ────────────────────────────────────────────────────────
@@ -225,7 +237,10 @@ Item {
 
                         Text {
                             width: parent.width
-                            text: String(modelData.snippet || "").replace(/<mark>/g, "<font color='#E08B57'><b>").replace(/<\/mark>/g, "</b></font>")
+                            text: String(modelData.snippet || "")
+                                .replace(/<font color="[^"]*">/g, "<font color='" + Theme.copper + "'>")
+                                .replace(/<mark>/g, "<font color='" + Theme.copper + "'><b>")
+                                .replace(/<\/mark>/g, "</b></font>")
                             color: Theme.textMuted
                             font.family: Theme.fontUI
                             font.pixelSize: 12

@@ -94,6 +94,31 @@ set_target_properties(stacks_native PROPERTIES
 )
 
 qt_add_executable(stacks src/main.cpp)
+qt_add_resources(stacks "stacks_branding"
+    PREFIX "/branding"
+    BASE "assets/branding"
+    FILES assets/branding/stacks-icon.png
+)
+if(APPLE)
+    set(STACKS_ICON "${CMAKE_CURRENT_SOURCE_DIR}/assets/branding/Stacks.icns")
+    set_source_files_properties("${STACKS_ICON}" PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+    target_sources(stacks PRIVATE "${STACKS_ICON}")
+    set_target_properties(stacks PROPERTIES
+        MACOSX_BUNDLE TRUE
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/assets/branding/Info.plist.in"
+        MACOSX_BUNDLE_BUNDLE_NAME "Stacks"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "local.stacks.reader"
+        MACOSX_BUNDLE_ICON_FILE "Stacks.icns"
+        MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+    )
+    # Keep the documented CLI and e2e entry point available alongside the app.
+    add_custom_command(TARGET stacks POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E rm -f "${CMAKE_CURRENT_BINARY_DIR}/stacks"
+        COMMAND ${CMAKE_COMMAND} -E create_symlink
+            "$<TARGET_FILE:stacks>" "${CMAKE_CURRENT_BINARY_DIR}/stacks"
+    )
+endif()
 target_link_libraries(stacks PRIVATE stacks_native Qt6::Quick Qt6::QuickControls2 Qt6::Gui)
 target_compile_definitions(stacks PRIVATE
     STACKS_QML_DIR="${CMAKE_CURRENT_SOURCE_DIR}/qml"

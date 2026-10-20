@@ -1,7 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Dialogs
-import "Theme.js" as Theme
+import "."
 
 ApplicationWindow {
     id: root
@@ -12,6 +12,16 @@ ApplicationWindow {
     visible: true
     color: Theme.ink0
     title: "Stacks"
+    palette.window: Theme.ink0
+    palette.windowText: Theme.text
+    palette.base: Theme.ink1
+    palette.alternateBase: Theme.ink2
+    palette.text: Theme.text
+    palette.button: Theme.ink2
+    palette.buttonText: Theme.text
+    palette.highlight: Theme.copper
+    palette.highlightedText: Theme.primaryText
+    palette.placeholderText: Theme.textFaint
 
     property bool paletteOpen: false
     property bool diagramOpen: false
@@ -57,6 +67,14 @@ ApplicationWindow {
         onActivated: root.focusMode = !root.focusMode
     }
     Shortcut {
+        sequence: "Ctrl+Shift+T"
+        onActivated: {
+            const modes = ["system", "light", "dark"]
+            controller.setThemeMode(modes[(modes.indexOf(controller.themeMode) + 1) % modes.length])
+            controller.toast("Appearance: " + controller.themeMode)
+        }
+    }
+    Shortcut {
         sequence: "Escape"
         onActivated: {
             if (commandPalette.visible)
@@ -75,7 +93,8 @@ ApplicationWindow {
         // ── Shelf ────────────────────────────────────────────────────────────
         LibraryPane {
             id: libraryPane
-            width: root.focusMode ? 0 : Theme.railLeft
+            objectName: "library-pane"
+            width: root.focusMode ? 0 : controller.readerOpen && root.width < 1280 ? 256 : Theme.railLeft
             height: parent.height
             clip: true
             opacity: root.focusMode ? 0 : 1
@@ -83,6 +102,14 @@ ApplicationWindow {
             onSearchRequested: commandPalette.open()
             onImportRequested: importDialog.open()
             onFocusToggled: root.focusMode = !root.focusMode
+            selectedShelf: deskView.shelfFilter
+            onKindleRequested: kindle.open()
+            onShelfRequested: function(key) {
+                deskView.shelfFilter = key
+                deskView.query = ""
+                deskView.formatFilter = "all"
+                controller.closeBook()
+            }
 
             Behavior on width { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
             Behavior on opacity { NumberAnimation { duration: 160 } }
@@ -95,6 +122,7 @@ ApplicationWindow {
 
             ReaderPane {
                 id: readerPane
+                objectName: "reader-pane"
                 anchors.fill: parent
                 visible: controller.readerOpen
                 opacity: controller.readerOpen ? 1 : 0
@@ -108,6 +136,7 @@ ApplicationWindow {
 
             DeskView {
                 id: deskView
+                objectName: "desk-view"
                 anchors.fill: parent
                 visible: !controller.readerOpen
                 opacity: controller.readerOpen ? 0 : 1
@@ -123,14 +152,15 @@ ApplicationWindow {
                 anchors.fill: parent
                 source: assetsDir + "/textures/grain.png"
                 fillMode: Image.Tile
-                opacity: 0.45
+                opacity: Theme.grainOpacity
             }
         }
 
         // ── Margin ───────────────────────────────────────────────────────────
         MarginPane {
             id: marginPane
-            width: controller.readerOpen && !root.focusMode ? Theme.railRight : 0
+            objectName: "margin-pane"
+            width: controller.readerOpen && !root.focusMode ? (root.width < 1280 ? 300 : Theme.railRight) : 0
             height: parent.height
             visible: width > 0
             opacity: controller.readerOpen ? 1 : 0

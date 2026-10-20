@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QByteArray>
 #include <QObject>
 #include <QString>
 #include <QStringList>
@@ -28,6 +29,9 @@ public:
         int timeoutMs = 30000;
     };
 
+    // Amazon's limit for documents sent by email.
+    static constexpr qint64 kMaxAttachmentBytes = 50LL * 1024 * 1024;
+
     explicit KindleSender(QObject *parent = nullptr);
     ~KindleSender() override;
 
@@ -53,7 +57,7 @@ private:
     void finish(bool ok, const QString &message);
     void writeLine(const QString &line);
     void command(State state, const QString &line);
-    QString buildMessage(const QString &filePath, const QString &title, const QString &author) const;
+    QByteArray buildMessage(const QString &filePath, const QString &title, const QString &author) const;
 
     QSslSocket *m_socket = nullptr;
     Settings m_settings;
@@ -61,7 +65,7 @@ private:
     QTimer m_timeout;
     QStringList m_replyLines;
     int m_replyCode = 0;
-    QString m_message;
+    QByteArray m_message;
     bool m_busy = false;
     bool m_deliveryAccepted = false;
 };

@@ -1,6 +1,6 @@
 import QtQuick
 import QtQuick.Controls
-import "Theme.js" as Theme
+import "."
 
 // Send to Kindle: pick a file, convert it into a Kindle-ready EPUB, and hand
 // it to Amazon's Send to Kindle service.
@@ -49,7 +49,7 @@ Item {
         controller.saveKindleSettings({
             "fromAddress": fromField.text,
             "smtpHost": hostField.text.length > 0 ? hostField.text : "smtp.gmail.com",
-            "smtpPort": 587,
+            "smtpPort": (controller.kindleSettings && controller.kindleSettings.smtpPort) || 587,
             "user": userField.text,
             "password": passwordField.text,
             "kindleAddress": kindleAddress.text
@@ -74,10 +74,11 @@ Item {
 
     Rectangle {
         anchors.fill: parent
-        color: "#C9000000"
+        color: Theme.scrim
         MouseArea {
             anchors.fill: parent
             onClicked: sheet.close()
+            onWheel: function(wheel) { wheel.accepted = true } // The desk below stays put.
         }
     }
 
@@ -100,13 +101,24 @@ Item {
         Rectangle {
             anchors.fill: parent
             anchors.topMargin: 10
+            anchors.bottomMargin: -8
+            anchors.leftMargin: 8
+            anchors.rightMargin: 8
             radius: 18
-            color: "#55000000"
+            color: Theme.deepShadow
             z: -1
+        }
+
+        // Clicks on the panel's empty space must not reach the scrim, which
+        // would close the sheet.
+        MouseArea {
+            anchors.fill: parent
+            onWheel: function(wheel) { wheel.accepted = true }
         }
 
         Column {
             anchors.fill: parent
+            anchors.margins: parent.border.width // Rows and panes stop inside the border.
             spacing: 0
 
             // ── Header ────────────────────────────────────────────────────────
@@ -141,7 +153,7 @@ Item {
                     anchors.right: parent.right
                     anchors.rightMargin: 18
                     anchors.verticalCenter: parent.verticalCenter
-                    icon: "close"
+                    iconName: "close"
                     label: "Close"
                     onClicked: sheet.close()
                 }
@@ -474,7 +486,7 @@ Item {
 
                             PillButton {
                                 label: controller.kindleBusy ? "Working…" : "Convert"
-                                icon: "spark"
+                                iconName: "spark"
                                 primary: true
                                 enabled: !controller.kindleBusy && sheet.sourcePath.length > 0
                                 onClicked: {
@@ -487,7 +499,7 @@ Item {
 
                             PillButton {
                                 label: "Send to Kindle"
-                                icon: "send"
+                                iconName: "send"
                                 enabled: !controller.kindleBusy && sheet.result() !== null
                                          && sheet.result().ok
                                 onClicked: {
@@ -501,7 +513,7 @@ Item {
 
                             PillButton {
                                 label: "Open sendtokindle"
-                                icon: "arrow-right"
+                                iconName: "arrow-right"
                                 onClicked: controller.openSendToKindle()
                             }
 
@@ -700,7 +712,8 @@ Item {
                                     width: (parent.width - 12) / 2
                                     height: 34
                                     color: Theme.text
-                                    placeholderText: "app password"
+                                    placeholderText: controller.kindleSettings && controller.kindleSettings.hasPassword
+                                                     ? "saved · type to replace" : "app password"
                                     placeholderTextColor: Theme.textGhost
                                     font.family: Theme.fontUI
                                     font.pixelSize: 12

@@ -32,17 +32,57 @@ QString escapeHtml(const QString &text)
     return escaped;
 }
 
+// FTS snippets are plain text with <mark>…</mark> around each hit. Trim the
+// text first and only then build the markup, so a cut can never land inside
+// a tag or leave one unclosed.
 QString highlightSnippet(const QString &raw, int radius = 140)
 {
-    QString text = escapeHtml(raw);
-    // escapeHtml turned the FTS markers into &lt;mark&gt;. Restore them as styled HTML.
-    text.replace(QStringLiteral("&lt;mark&gt;"), QStringLiteral("<b><font color=\"#C46A3B\">"));
-    text.replace(QStringLiteral("&lt;/mark&gt;"), QStringLiteral("</font></b>"));
-    if (text.size() > radius * 2)
-        text = QStringLiteral("…") + text.right(radius * 2);
-    else if (!raw.startsWith(QStringLiteral("…")))
-        text.prepend(QStringLiteral("…"));
-    return text + QStringLiteral("…");
+    static const QString openMark = QStringLiteral("<mark>");
+    static const QString closeMark = QStringLiteral("</mark>");
+    QString plain;
+    QVector<bool> marked;
+    plain.reserve(raw.size());
+    marked.reserve(raw.size());
+    bool inside = false;
+    for (qsizetype i = 0; i < raw.size();) {
+        const QStringView rest = QStringView(raw).mid(i);
+        if (rest.startsWith(openMark)) {
+            inside = true;
+            i += openMark.size();
+        } else if (rest.startsWith(closeMark)) {
+            inside = false;
+            i += closeMark.size();
+        } else {
+            plain.append(raw.at(i));
+            marked.append(inside);
+            ++i;
+        }
+    }
+
+    qsizetype start = 0;
+    qsizetype end = plain.size();
+    const qsizetype limit = qsizetype(radius) * 2;
+    if (plain.size() > limit) {
+        // Keep the first hit in view, with a little context before it.
+        const qsizetype firstHit = std::max<qsizetype>(0, marked.indexOf(true));
+        start = std::clamp<qsizetype>(firstHit - radius / 2, 0, plain.size() - limit);
+        end = start + limit;
+    }
+
+    QString html;
+    if (start > 0 || !plain.startsWith(QStringLiteral("…")))
+        html += QStringLiteral("…");
+    for (qsizetype run = start; run < end;) {
+        qsizetype next = run;
+        while (next < end && marked.at(next) == marked.at(run))
+            ++next;
+        const QString text = escapeHtml(plain.mid(run, next - run));
+        html += marked.at(run) ? QStringLiteral("<b><font color=\"#C46A3B\">%1</font></b>").arg(text) : text;
+        run = next;
+    }
+    if (end < plain.size() || !plain.endsWith(QStringLiteral("…")))
+        html += QStringLiteral("…");
+    return html;
 }
 
 QVector<Passage> splitIntoPassages(const QString &text, int page, const QString &prefix)
@@ -391,12 +431,46 @@ bool Library::updateAnnotation(int annotationId, const QString &note, const QStr
     return true;
 }
 
-bool Library::deleteAnnotation(int annotationId)
+bool Library::deleteAnnotation(int annotationId, QStringList *recordingPaths)
 {
-    QSqlQuery query(m_database->db());
+    QSqlDatabase db = m_database->db();
+    QSqlQuery voices(db);
+    voices.prepare(QStringLiteral(
+        "SELECT id, path FROM voice_notes WHERE annotation_id = :annotation "
+        "OR id = (SELECT voice_id FROM annotations WHERE id = :id)"));
+    voices.bindValue(QStringLiteral(":annotation"), annotationId);
+    voices.bindValue(QStringLiteral(":id"), annotationId);
+    if (!voices.exec())
+        return false;
+    QVector<int> voiceIds;
+    QStringList paths;
+    while (voices.next()) {
+        voiceIds.append(voices.value(0).toInt());
+        paths.append(voices.value(1).toString());
+    }
+    voices.finish();
+
+    // Without this a deleted voice note would leave its row, and its audio
+    // file, behind for good.
+    db.transaction();
+    QSqlQuery query(db);
+    query.prepare(QStringLiteral("DELETE FROM voice_notes WHERE id = :id"));
+    for (const int voiceId : std::as_const(voiceIds)) {
+        query.bindValue(QStringLiteral(":id"), voiceId);
+        if (!query.exec()) {
+            db.rollback();
+            return false;
+        }
+    }
     query.prepare(QStringLiteral("DELETE FROM annotations WHERE id = :id"));
     query.bindValue(QStringLiteral(":id"), annotationId);
-    return query.exec();
+    if (!query.exec() || !db.commit()) {
+        db.rollback();
+        return false;
+    }
+    if (recordingPaths)
+        *recordingPaths += paths;
+    return true;
 }
 
 int Library::addVoiceNote(int bookId, int annotationId, const QString &path,
@@ -599,11 +673,19 @@ bool Library::deleteDiagramNode(int nodeId)
     return query.exec();
 }
 
-QVector<DiagramEdge> Library::diagramEdges() const
+QVector<DiagramEdge> Library::diagramEdges(int bookId) const
 {
     QVector<DiagramEdge> result;
     QSqlQuery query(m_database->db());
-    if (!query.exec(QStringLiteral("SELECT id, from_node, to_node, label FROM diagram_edges ORDER BY id")))
+    query.prepare(QStringLiteral(
+        "SELECT e.id, e.from_node, e.to_node, e.label FROM diagram_edges e "
+        "JOIN diagram_nodes a ON a.id = e.from_node "
+        "JOIN diagram_nodes b ON b.id = e.to_node "
+        "WHERE a.book_id IN (:from_book, 0) AND b.book_id IN (:to_book, 0) "
+        "ORDER BY e.id"));
+    query.bindValue(QStringLiteral(":from_book"), bookId);
+    query.bindValue(QStringLiteral(":to_book"), bookId);
+    if (!query.exec())
         return result;
     while (query.next()) {
         DiagramEdge edge;
@@ -620,6 +702,33 @@ int Library::addDiagramEdge(int fromNode, int toNode, const QString &label)
 {
     if (fromNode <= 0 || toNode <= 0 || fromNode == toNode)
         return 0;
+
+    // Both ends must exist and sit on the same canvas: one book's, or the
+    // shared one (book 0) that every book shows.
+    QSqlQuery nodes(m_database->db());
+    nodes.prepare(QStringLiteral("SELECT book_id FROM diagram_nodes WHERE id IN (:from, :to)"));
+    nodes.bindValue(QStringLiteral(":from"), fromNode);
+    nodes.bindValue(QStringLiteral(":to"), toNode);
+    if (!nodes.exec())
+        return 0;
+    QVector<int> books;
+    while (nodes.next())
+        books.append(nodes.value(0).toInt());
+    if (books.size() != 2 || (books.at(0) != 0 && books.at(1) != 0 && books.at(0) != books.at(1)))
+        return 0;
+
+    // A connection is one line on the canvas whichever way it was drawn.
+    QSqlQuery existing(m_database->db());
+    existing.prepare(QStringLiteral(
+        "SELECT id FROM diagram_edges WHERE (from_node = :a AND to_node = :b) "
+        "OR (from_node = :c AND to_node = :d) ORDER BY id LIMIT 1"));
+    existing.bindValue(QStringLiteral(":a"), fromNode);
+    existing.bindValue(QStringLiteral(":b"), toNode);
+    existing.bindValue(QStringLiteral(":c"), toNode);
+    existing.bindValue(QStringLiteral(":d"), fromNode);
+    if (existing.exec() && existing.next())
+        return existing.value(0).toInt();
+
     QSqlQuery query(m_database->db());
     query.prepare(QStringLiteral(
         "INSERT INTO diagram_edges(from_node, to_node, label) VALUES (:from, :to, :label)"));

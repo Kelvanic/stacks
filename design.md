@@ -7,6 +7,20 @@
 | Design thesis | A quiet instrument, not a dashboard |
 | References | Mobbin MCP (connected): Kindle web reader, Matter, Literal, Craft, Bear, Spotify, ElevenLabs, Gumloop, Vapi, Juicebox, ElevenLabs manuscript, NYT conversation panel |
 
+
+### Implemented identity and shelf refresh
+
+The home screen is now a browsable reading desk with a four-column shelf at wide
+sizes, responsive columns and vertical scrolling, saved-progress filters, a
+resume action, and a restrained welcome card. Generated tactile book-stack
+artwork anchors the sidebar, home screen, and native macOS app icon. Covers keep
+their cloth palette with deterministic wave, arch, and circle linework.
+
+The icon vocabulary includes library, home, completion, local storage, and
+appearance symbols. Buttons use Qt controls for keyboard interaction, accessible
+names, visible focus borders, and popup tooltips. The reader title yields space
+to its tools at narrow widths. Light/dark/system appearance remains reactive.
+
 ---
 
 ## 1. The feeling
@@ -49,7 +63,7 @@ Avoid:
 
 ### 3.1 Color — dark (default)
 
-Live values live in `qml/Theme.js`; this table is the contract.
+Live values live in `qml/Theme.qml`; the table below describes the original dark palette. The reactive tokens now also include a light palette and follow-system appearance.
 
 | Token | Value | Use |
 |---|---|---|

@@ -2,7 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import Stacks.Native 1.0
-import "Theme.js" as Theme
+import "."
 
 Rectangle {
     id: pane
@@ -64,8 +64,8 @@ Rectangle {
                 ctx.clearRect(0, 0, width, height)
             const g = ctx.createRadialGradient(width * 0.5, height * 0.34, 10,
                                                width * 0.5, height * 0.34, Math.max(width, height) * 0.72)
-            g.addColorStop(0, "rgba(201,112,63,0.13)")
-            g.addColorStop(0.45, "rgba(160,110,70,0.05)")
+            g.addColorStop(0, Theme.glow)
+            g.addColorStop(0.45, Theme.glowSoft)
             g.addColorStop(1, "rgba(0,0,0,0)")
             ctx.fillStyle = g
             ctx.fillRect(0, 0, width, height)
@@ -74,6 +74,10 @@ Rectangle {
             target: pane
             function onWidthChanged() { deskGlow.requestPaint() }
             function onHeightChanged() { deskGlow.requestPaint() }
+        }
+        Connections {
+            target: Theme
+            function onDarkChanged() { deskGlow.requestPaint() }
         }
     }
 
@@ -84,6 +88,7 @@ Rectangle {
         // ── Top bar ─────────────────────────────────────────────────────────
         Rectangle {
             id: topBar
+            objectName: "reader-toolbar"
             width: parent.width
             height: Theme.topBar
             color: Theme.ink1
@@ -118,7 +123,7 @@ Rectangle {
                 spacing: 6
 
                 TopAction {
-                    icon: "chevron-left"
+                    iconName: "chevron-left"
                     label: "Back to the desk"
                     onClicked: controller.closeBook()
                 }
@@ -126,37 +131,39 @@ Rectangle {
                 Column {
                     Layout.alignment: Qt.AlignVCenter
                     Layout.leftMargin: 6
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
                     spacing: 4
 
                     Text {
                         text: pane.book.title || "Untitled"
                         color: Theme.text
-                        font.family: Theme.fontBook
-                        font.pixelSize: 19
-                        font.weight: Font.Medium
+                        font.family: Theme.fontUI
+                        font.pixelSize: 14
+                        font.weight: Font.DemiBold
                         elide: Text.ElideRight
-                        width: Math.min(implicitWidth, 420)
+                        width: parent.width
                     }
                     Text {
                         text: {
-                            const author = (pane.book.author || "Unknown author").toUpperCase()
+                            const author = pane.book.author || "Unknown author"
                             const format = (pane.book.format || "").toUpperCase()
                             const where = reader.format === "pdf"
                                 ? "PAGE " + (reader.currentPage + 1) + " / " + reader.pageCount
                                 : Math.round(reader.progress * 100) + "% READ"
                             return author + "   ·   " + format + "   ·   " + where
                         }
+                        width: parent.width
+                        elide: Text.ElideRight
                         color: Theme.textFaint
-                        font.family: Theme.fontMono
-                        font.pixelSize: 8
-                        font.letterSpacing: 1.1
+                        font.family: Theme.fontUI
+                        font.pixelSize: 10
                     }
                 }
 
-                Item { Layout.fillWidth: true }
-
                 TopAction {
-                    icon: "search"
+                    visible: pane.width > 620
+                    iconName: "search"
                     label: "Search"
                     shortcut: "⌘K"
                     onClicked: pane.searchRequested()
@@ -170,7 +177,7 @@ Rectangle {
                 }
 
                 TopAction {
-                    icon: "highlight"
+                    iconName: "highlight"
                     label: "Highlight"
                     enabled: reader.selectedText.length > 0
                     active: reader.selectedText.length > 0
@@ -181,13 +188,13 @@ Rectangle {
                 }
 
                 TopAction {
-                    icon: "bookmark"
+                    iconName: "bookmark"
                     label: "Bookmark"
                     onClicked: controller.addBookmark(reader.locator, reader.currentPage)
                 }
 
                 TopAction {
-                    icon: "note"
+                    iconName: "note"
                     label: "Note"
                     onClicked: {
                         noteInput.text = ""
@@ -197,7 +204,7 @@ Rectangle {
                 }
 
                 TopAction {
-                    icon: "mic"
+                    iconName: "mic"
                     label: controller.recording ? "Stop recording" : "Voice note"
                     active: controller.recording
                     onClicked: {
@@ -219,21 +226,22 @@ Rectangle {
                 }
 
                 TopAction {
-                    icon: "diagram"
+                    iconName: "diagram"
                     label: "Diagram"
                     shortcut: "⌘⇧D"
                     onClicked: pane.diagramRequested()
                 }
 
                 TopAction {
-                    icon: "send"
+                    visible: pane.width > 620
+                    iconName: "send"
                     label: "Send to Kindle"
                     shortcut: "⌘⇧K"
                     onClicked: pane.kindleRequested()
                 }
 
                 TopAction {
-                    icon: "panel-right"
+                    iconName: "panel-right"
                     label: "Focus"
                     shortcut: "⌘\\"
                     onClicked: pane.focusToggled()
@@ -317,22 +325,27 @@ Rectangle {
                 anchors.leftMargin: 46
                 anchors.rightMargin: 46
                 anchors.topMargin: 26
-                anchors.bottomMargin: 62
+                anchors.bottomMargin: 78
 
-                // Shadow cast on the desk.
+                // Shadow cast on the desk. Offset below the sheet: filling the
+                // sheet's own rectangle would leave it hidden underneath.
                 Rectangle {
                     visible: paperSheet.visible
                     anchors.fill: paperSheet
                     anchors.topMargin: 14
+                    anchors.bottomMargin: -10
+                    anchors.leftMargin: 6
+                    anchors.rightMargin: 6
                     radius: 16
-                    color: "#4D000000"
+                    color: Theme.deepShadow
                 }
                 Rectangle {
                     visible: paperSheet.visible
                     anchors.fill: paperSheet
                     anchors.topMargin: 6
+                    anchors.bottomMargin: -4
                     radius: 12
-                    color: "#33000000"
+                    color: Theme.shadow
                 }
 
                 // A bound book: a parchment sheet with a bound edge.
@@ -352,7 +365,7 @@ Rectangle {
                         anchors.fill: parent
                         source: assetsDir + "/textures/paper.png"
                         fillMode: Image.Tile
-                        opacity: 0.5
+                        opacity: Theme.paperTextureOpacity
                     }
 
                     // The bound edge.
@@ -363,8 +376,8 @@ Rectangle {
                         width: 18
                         gradient: Gradient {
                             orientation: Gradient.Horizontal
-                            GradientStop { position: 0.0; color: "#1A120A" }
-                            GradientStop { position: 0.35; color: "#0D0906" }
+                            GradientStop { position: 0.0; color: Theme.paperEdge }
+                            GradientStop { position: 0.35; color: Qt.alpha(Theme.paperEdge, 0.5) }
                             GradientStop { position: 1.0; color: "transparent" }
                         }
                     }
@@ -376,7 +389,7 @@ Rectangle {
                         radius: 3
                         color: "transparent"
                         border.width: 1
-                        border.color: "#22FFFFFF"
+                        border.color: Theme.hair
                     }
                 }
 
@@ -390,8 +403,14 @@ Rectangle {
                     x: reader.format === "pdf" ? 0 : paperSheet.x
                     y: 0
                     clip: true
+                    textColor: Theme.paperInk
+                    accentColor: Theme.copper
+                    mutedColor: Theme.paperMuted
                     onPositionChanged: function(locator, progress) {
                         controller.savePosition(locator, progress)
+                    }
+                    onErrorOccurred: function(message) {
+                        controller.toast(message)
                     }
                 }
 
@@ -429,30 +448,34 @@ Rectangle {
             HoverHandler { id: wellHover }
 
             // ── Folio ───────────────────────────────────────────────────────
-            Item {
+            Rectangle {
                 id: folio
                 anchors.left: parent.left
                 anchors.right: parent.right
+                anchors.leftMargin: 24
+                anchors.rightMargin: 24
                 anchors.bottom: parent.bottom
-                anchors.bottomMargin: 20
-                height: 24
+                anchors.bottomMargin: 16
+                height: 40
+                radius: 10
+                color: Theme.ink1
+                border.color: Theme.lineSoft
 
                 Text {
                     anchors.left: parent.left
-                    anchors.leftMargin: 26
+                    anchors.leftMargin: 16
                     anchors.verticalCenter: parent.verticalCenter
                     text: reader.format === "pdf"
-                          ? "PAGE " + (reader.currentPage + 1) + " OF " + reader.pageCount
-                          : Math.round(reader.progress * 100) + "% READ"
-                    color: Theme.textGhost
-                    font.family: Theme.fontMono
-                    font.pixelSize: 8
-                    font.letterSpacing: 1.2
+                          ? "Page " + (reader.currentPage + 1) + " of " + reader.pageCount
+                          : Math.round(reader.progress * 100) + "% complete"
+                    color: Theme.textFaint
+                    font.family: Theme.fontUI
+                    font.pixelSize: 11
                 }
 
                 Item {
                     anchors.centerIn: parent
-                    width: 260
+                    width: Math.max(40, Math.min(160, parent.width - 260))
                     height: 3
 
                     Rectangle {
@@ -469,15 +492,13 @@ Rectangle {
                     }
                 }
 
-                Text {
+                Row {
                     anchors.right: parent.right
-                    anchors.rightMargin: 26
+                    anchors.rightMargin: 5
                     anchors.verticalCenter: parent.verticalCenter
-                    text: "← →  PAGES"
-                    color: Theme.textGhost
-                    font.family: Theme.fontMono
-                    font.pixelSize: 8
-                    font.letterSpacing: 1.2
+                    spacing: 3
+                    TopAction { objectName: "reader-previous"; iconName: "chevron-left"; label: "Previous page"; enabled: reader.ready && reader.progress > 0; onClicked: reader.previousPage() }
+                    TopAction { objectName: "reader-next"; iconName: "chevron-right"; label: "Next page"; enabled: reader.ready && reader.progress < 1; onClicked: reader.nextPage() }
                 }
             }
 
@@ -498,8 +519,9 @@ Rectangle {
                 Rectangle {
                     anchors.fill: parent
                     anchors.topMargin: 8
+                    anchors.bottomMargin: -6
                     radius: 14
-                    color: "#33000000"
+                    color: Theme.shadow
                     z: -1
                 }
 
@@ -535,7 +557,7 @@ Rectangle {
 
                     PillButton {
                         label: "Highlight"
-                        icon: "highlight"
+                        iconName: "highlight"
                         primary: true
                         onClicked: {
                             controller.addHighlight(reader.selectedText, reader.selectionLocator, reader.currentPage)
@@ -545,7 +567,7 @@ Rectangle {
 
                     PillButton {
                         label: "Note"
-                        icon: "note"
+                        iconName: "note"
                         onClicked: {
                             noteInput.text = ""
                             pane.noteVisible = true
@@ -574,8 +596,9 @@ Rectangle {
                 Rectangle {
                     anchors.fill: parent
                     anchors.topMargin: 8
+                    anchors.bottomMargin: -6
                     radius: 14
-                    color: "#33000000"
+                    color: Theme.shadow
                     z: -1
                 }
 
@@ -644,7 +667,7 @@ Rectangle {
 
                         PillButton {
                             label: "Save note"
-                            icon: "note"
+                            iconName: "note"
                             primary: true
                             onClicked: {
                                 const note = noteInput.text.trim()
@@ -684,8 +707,9 @@ Rectangle {
                 Rectangle {
                     anchors.fill: parent
                     anchors.topMargin: 8
+                    anchors.bottomMargin: -6
                     radius: 14
-                    color: "#33000000"
+                    color: Theme.shadow
                     z: -1
                 }
 
@@ -788,7 +812,7 @@ Rectangle {
 
                         PillButton {
                             label: controller.recording ? "Stop & save" : "Save voice"
-                            icon: "mic"
+                            iconName: "mic"
                             primary: true
                             onClicked: {
                                 if (controller.recording) {

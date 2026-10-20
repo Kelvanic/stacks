@@ -1,6 +1,6 @@
 import QtQuick
 import QtQuick.Controls
-import "Theme.js" as Theme
+import "."
 
 Rectangle {
     id: pane
@@ -65,50 +65,48 @@ Rectangle {
         anchors.top: parent.top
         anchors.left: parent.left
         anchors.right: parent.right
-        height: 62
+        height: 104
 
         Text {
             id: headerLabel
             anchors.left: parent.left
-            anchors.leftMargin: 22
-            anchors.verticalCenter: parent.verticalCenter
-            text: "MARGIN"
-            color: Theme.textGhost
-            font.family: Theme.fontMono
-            font.pixelSize: 8
-            font.letterSpacing: 1.6
+            anchors.leftMargin: 24
+            y: 28
+            text: "Your margin"
+            color: Theme.text
+            font.family: Theme.fontBook
+            font.pixelSize: 25
+            font.weight: Font.Medium
         }
 
         Rectangle {
             anchors.left: headerLabel.right
             anchors.leftMargin: 10
-            anchors.verticalCenter: parent.verticalCenter
+            y: 32
             width: countLabel.implicitWidth + 14
-            height: 18
-            radius: 9
-            color: Theme.ink3
+            height: 20
+            radius: 10
+            color: Theme.copperWash
 
             Text {
                 id: countLabel
                 anchors.centerIn: parent
                 text: controller.annotations.length
-                color: Theme.textMuted
+                color: Theme.copper
                 font.family: Theme.fontMono
-                font.pixelSize: 9
+                font.pixelSize: 10
             }
         }
 
         Text {
-            anchors.right: parent.right
-            anchors.rightMargin: 22
-            anchors.verticalCenter: parent.verticalCenter
-            text: (controller.currentBook.title || "").toUpperCase()
-            color: Theme.textGhost
-            font.family: Theme.fontMono
-            font.pixelSize: 8
-            font.letterSpacing: 1
-            elide: Text.ElideLeft
-            width: Math.min(implicitWidth, 140)
+            x: 24
+            y: 66
+            width: parent.width - 48
+            text: "A place for everything worth keeping."
+            color: Theme.textFaint
+            font.family: Theme.fontUI
+            font.pixelSize: 11
+            elide: Text.ElideRight
         }
     }
 
@@ -121,44 +119,23 @@ Rectangle {
         anchors.leftMargin: 22
         anchors.right: parent.right
         anchors.rightMargin: 22
-        height: 24
-        spacing: 6
+        height: 32
+        spacing: 5
 
         Repeater {
             model: [
-                { key: "all", label: "ALL" },
-                { key: "highlight", label: "MARKS" },
-                { key: "note", label: "NOTES" },
-                { key: "voice", label: "VOICE" }
+                { key: "all", label: "All" },
+                { key: "highlight", label: "Marks" },
+                { key: "note", label: "Notes" },
+                { key: "voice", label: "Voice" }
             ]
-            delegate: Rectangle {
-                id: chip
-                height: 24
-                width: chipText.implicitWidth + 18
-                radius: 6
-                color: pane.filter === modelData.key ? Theme.copperWash
-                             : (chipHover.hovered ? Theme.ink3 : "transparent")
-                border.width: 1
-                border.color: pane.filter === modelData.key ? Theme.copperSoft : Theme.line
-
-                Behavior on color { ColorAnimation { duration: 120 } }
-
-                Text {
-                    id: chipText
-                    anchors.centerIn: parent
-                    text: modelData.label
-                    color: pane.filter === modelData.key ? Theme.copper : Theme.textFaint
-                    font.family: Theme.fontMono
-                    font.pixelSize: 8
-                    font.letterSpacing: 1.1
-                }
-
-                HoverHandler { id: chipHover }
-                MouseArea {
-                    anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: pane.filter = modelData.key
-                }
+            delegate: PillButton {
+                objectName: "margin-filter-" + modelData.key
+                height: 30
+                horizontalPadding: 9
+                label: modelData.label + " " + (modelData.key === "all" ? controller.annotations.length : controller.annotations.filter(a => a.kind === modelData.key).length)
+                active: pane.filter === modelData.key
+                onClicked: pane.filter = modelData.key
             }
         }
     }
@@ -224,9 +201,9 @@ Rectangle {
         id: timeline
         visible: pane.visibleAnnotations().length > 0
         anchors.top: filters.bottom
-        anchors.topMargin: 14
+        anchors.topMargin: 26
         anchors.left: parent.left
-        anchors.leftMargin: 22
+        anchors.leftMargin: 24
         anchors.right: parent.right
         anchors.rightMargin: 22
         anchors.bottom: diagram.top
@@ -291,7 +268,7 @@ Rectangle {
                     text: entry.annotation.quote || ""
                     color: Theme.text
                     font.family: Theme.fontBook
-                    font.pixelSize: 15
+                    font.pixelSize: 17
                     font.italic: true
                     wrapMode: Text.WordWrap
                     maximumLineCount: 4
@@ -405,7 +382,7 @@ Rectangle {
                 cursorShape: Qt.PointingHandCursor
                 onClicked: {
                     if (entry.kind === "voice" && entry.annotation.audioPath)
-                        Qt.openUrlExternally("file://" + entry.annotation.audioPath)
+                        controller.openLocalFile(entry.annotation.audioPath)
                     else
                         controller.openAnnotation(entry.annotation.id)
                 }
@@ -464,6 +441,10 @@ Rectangle {
                         ctx.stroke()
                     }
                 }
+                Connections {
+                    target: Theme
+                    function onDarkChanged() { mapPreview.requestPaint() }
+                }
             }
 
             Column {
@@ -473,17 +454,17 @@ Rectangle {
                 spacing: 4
 
                 Text {
-                    text: "Diagram canvas"
+                    text: "Connect your ideas"
                     color: Theme.text
                     font.family: Theme.fontUI
                     font.pixelSize: 12
                     font.weight: Font.Medium
                 }
                 Text {
-                    text: "Turn the margin into a map"
+                    text: "Open the diagram canvas"
                     color: Theme.textFaint
                     font.family: Theme.fontUI
-                    font.pixelSize: 11
+                    font.pixelSize: 10
                 }
             }
 

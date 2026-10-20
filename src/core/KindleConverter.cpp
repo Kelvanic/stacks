@@ -17,6 +17,7 @@
 
 #include <zip.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 
@@ -369,13 +370,70 @@ bool readPdfChapters(const QString &path, QVector<KindleChapter> &chapters, int 
     return true;
 }
 
-bool readTextChapters(const QString &path, QVector<KindleChapter> &chapters, int &pages, int &words)
+// Reduces an HTML page to the line-oriented text below: headings become "# "
+// lines that start chapters, block ends become line breaks, tags are dropped
+// and entities decoded, so the EPUB shows prose rather than escaped markup.
+QString htmlToText(QString html)
+{
+    static const QRegularExpression dropped(
+        QStringLiteral("<(script|style|head|svg|template)\\b[^>]*>.*?</\\1\\s*>|<!--.*?-->"),
+        QRegularExpression::CaseInsensitiveOption | QRegularExpression::DotMatchesEverythingOption);
+    static const QRegularExpression heading(QStringLiteral("<h[1-3]\\b[^>]*>"),
+                                            QRegularExpression::CaseInsensitiveOption);
+    static const QRegularExpression breaks(
+        QStringLiteral("<br\\b[^>]*>|</(p|div|li|h[1-6]|blockquote|pre|tr|section|article|header|footer)\\s*>"),
+        QRegularExpression::CaseInsensitiveOption);
+    static const QRegularExpression tags(QStringLiteral("<[^>]*>"));
+    static const QRegularExpression entity(QStringLiteral("&(#[xX][0-9a-fA-F]{1,6}|#[0-9]{1,7}|[a-zA-Z]{2,8});"));
+    static const QHash<QString, char32_t> named = {
+        {QStringLiteral("amp"), U'&'}, {QStringLiteral("lt"), U'<'}, {QStringLiteral("gt"), U'>'},
+        {QStringLiteral("quot"), U'"'}, {QStringLiteral("apos"), U'\''}, {QStringLiteral("nbsp"), U' '},
+        {QStringLiteral("mdash"), U'—'}, {QStringLiteral("ndash"), U'–'}, {QStringLiteral("hellip"), U'…'},
+        {QStringLiteral("lsquo"), U'‘'}, {QStringLiteral("rsquo"), U'’'}, {QStringLiteral("ldquo"), U'“'},
+        {QStringLiteral("rdquo"), U'”'}, {QStringLiteral("laquo"), U'«'}, {QStringLiteral("raquo"), U'»'},
+        {QStringLiteral("bull"), U'•'}, {QStringLiteral("middot"), U'·'}, {QStringLiteral("copy"), U'©'},
+        {QStringLiteral("reg"), U'®'}, {QStringLiteral("trade"), U'™'}, {QStringLiteral("deg"), U'°'},
+        {QStringLiteral("eacute"), U'é'}, {QStringLiteral("egrave"), U'è'}, {QStringLiteral("agrave"), U'à'},
+        {QStringLiteral("ccedil"), U'ç'}, {QStringLiteral("auml"), U'ä'}, {QStringLiteral("ouml"), U'ö'},
+        {QStringLiteral("uuml"), U'ü'}, {QStringLiteral("szlig"), U'ß'}};
+
+    html.remove(dropped);
+    html.replace(heading, QStringLiteral("\n# "));
+    html.replace(breaks, QStringLiteral("\n"));
+    html.remove(tags);
+
+    QString text;
+    text.reserve(html.size());
+    qsizetype last = 0;
+    QRegularExpressionMatchIterator matches = entity.globalMatch(html);
+    while (matches.hasNext()) {
+        const QRegularExpressionMatch match = matches.next();
+        text += QStringView(html).mid(last, match.capturedStart() - last);
+        const QString name = match.captured(1);
+        char32_t code = 0;
+        if (name.startsWith(QLatin1String("#x"), Qt::CaseInsensitive))
+            code = name.mid(2).toUInt(nullptr, 16);
+        else if (name.startsWith(QLatin1Char('#')))
+            code = name.mid(1).toUInt();
+        else
+            code = named.value(name, 0);
+        if (code > 0 && code <= 0x10FFFF && (code < 0xD800 || code > 0xDFFF))
+            text += QString::fromUcs4(&code, 1);
+        else
+            text += match.captured(0);
+        last = match.capturedEnd();
+    }
+    text += QStringView(html).mid(last);
+    return text;
+}
+
+bool readTextChapters(const QString &path, bool html, QVector<KindleChapter> &chapters, int &pages, int &words)
 {
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
         return false;
     QTextStream stream(&file);
-    const QString text = stream.readAll();
+    const QString text = html ? htmlToText(stream.readAll()) : stream.readAll();
     file.close();
 
     KindleChapter current;
@@ -436,13 +494,31 @@ QString KindleConverter::suggestedFileName(const QString &title, const QString &
     if (!author.trimmed().isEmpty())
         name += QStringLiteral(" - ") + author.trimmed();
 
-    const QRegularExpression illegal(QStringLiteral("[^A-Za-z0-9 _\\-\\.]"));
-    QString cleaned = name;
-    cleaned.remove(illegal);
-    cleaned.replace(QLatin1Char(' '), QLatin1Char('-'));
+    // Fold accents (Café → Cafe), then keep a portable ASCII subset.
+    QString cleaned;
+    for (const QChar c : name.normalized(QString::NormalizationForm_KD)) {
+        if (c.unicode() < 0x80 && (c.isLetterOrNumber() || c == QLatin1Char('_')
+                                   || c == QLatin1Char('-') || c == QLatin1Char('.')))
+            cleaned += c;
+        else if (c.isSpace())
+            cleaned += QLatin1Char('-');
+    }
     while (cleaned.contains(QLatin1String("--")))
         cleaned.replace(QLatin1String("--"), QLatin1String("-"));
-    return cleaned + QStringLiteral(".epub");
+    // A title in another script must not become ".epub", a hidden file, nor
+    // exceed what file systems allow.
+    const auto trim = [&cleaned]() {
+        while (cleaned.startsWith(QLatin1Char('.')) || cleaned.startsWith(QLatin1Char('-')))
+            cleaned.remove(0, 1);
+        while (cleaned.endsWith(QLatin1Char('.')) || cleaned.endsWith(QLatin1Char('-')))
+            cleaned.chop(1);
+    };
+    trim();
+    cleaned.truncate(120);
+    trim();
+    const bool readable = std::any_of(cleaned.cbegin(), cleaned.cend(),
+                                      [](QChar c) { return c.isLetterOrNumber(); });
+    return (readable ? cleaned : QStringLiteral("Untitled")) + QStringLiteral(".epub");
 }
 
 KindleConverter::Result KindleConverter::convert(const QString &sourcePath,
@@ -626,7 +702,7 @@ KindleConverter::Result KindleConverter::convert(const QString &sourcePath,
         result.bytes = QFileInfo(outPath).size();
         return result;
     } else {
-        if (!readTextChapters(sourcePath, chapters, result.pages, result.words)) {
+        if (!readTextChapters(sourcePath, format == QStringLiteral("html"), chapters, result.pages, result.words)) {
             result.error = QStringLiteral("This file could not be read.");
             return result;
         }

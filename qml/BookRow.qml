@@ -1,5 +1,5 @@
 import QtQuick
-import "Theme.js" as Theme
+import "."
 
 Item {
     id: row

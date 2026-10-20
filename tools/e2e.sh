@@ -46,8 +46,16 @@ step "Render PDF reader"
 run_app --open 3 --screenshot "$OUT_DIR/reader-pdf.png"
 test -s "$OUT_DIR/reader-pdf.png"
 
+for theme in light dark; do
+    step "Render $theme appearance"
+    run_app --theme "$theme" --screenshot "$OUT_DIR/welcome-$theme.png"
+    run_app --theme "$theme" --open 2 --screenshot "$OUT_DIR/reader-$theme.png"
+    test -s "$OUT_DIR/welcome-$theme.png"
+    test -s "$OUT_DIR/reader-$theme.png"
+done
+
 step "Headless search"
-run_app --query "margin" > "$OUT_DIR/search.txt"
+run_app --theme system --query "margin" > "$OUT_DIR/search.txt"
 grep -q "Systems That Breathe" "$OUT_DIR/search.txt"
 grep -q "The Art of Attention" "$OUT_DIR/search.txt"
 

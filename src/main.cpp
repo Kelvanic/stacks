@@ -7,6 +7,7 @@
 #include <QDir>
 #include <QFontDatabase>
 #include <QGuiApplication>
+#include <QIcon>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQuickWindow>
@@ -49,6 +50,9 @@ int main(int argc, char *argv[])
     QCoreApplication::setApplicationName(QStringLiteral("Stacks"));
     QCoreApplication::setApplicationVersion(QStringLiteral("0.1.0"));
 
+    app.setWindowIcon(QIcon(QStringLiteral(":/branding/stacks-icon.png")));
+    app.setApplicationDisplayName(QStringLiteral("Stacks"));
+
     loadFonts();
     PdfDocument::globalInit();
 
@@ -65,6 +69,8 @@ int main(int argc, char *argv[])
                                      QStringLiteral("path"));
     QCommandLineOption dataOption(QStringList { QStringLiteral("data-dir") },
                                   QStringLiteral("Use an explicit local data directory."), QStringLiteral("path"));
+    QCommandLineOption themeOption(QStringList { QStringLiteral("theme") },
+                                   QStringLiteral("Appearance: system, light or dark."), QStringLiteral("mode"));
     QCommandLineOption screenshotOption(QStringList { QStringLiteral("screenshot") },
                                         QStringLiteral("Render the UI once and save a PNG."),
                                         QStringLiteral("path"));
@@ -82,6 +88,7 @@ int main(int argc, char *argv[])
                                      QStringLiteral("Open the diagram canvas after launch."));
     parser.addOption(importOption);
     parser.addOption(dataOption);
+    parser.addOption(themeOption);
     parser.addOption(screenshotOption);
     parser.addOption(smokeOption);
     parser.addOption(queryOption);
@@ -95,6 +102,15 @@ int main(int argc, char *argv[])
         qCritical("Stacks failed to initialize its local library.");
         PdfDocument::globalShutdown();
         return 2;
+    }
+    if (parser.isSet(themeOption)) {
+        const QString mode = parser.value(themeOption);
+        if (mode != QStringLiteral("system") && mode != QStringLiteral("light") && mode != QStringLiteral("dark")) {
+            qCritical("Unknown theme. Choose system, light or dark.");
+            PdfDocument::globalShutdown();
+            return 2;
+        }
+        controller.setThemeMode(mode);
     }
 
     if (parser.isSet(importOption))

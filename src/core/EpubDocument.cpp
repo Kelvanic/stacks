@@ -12,24 +12,36 @@ namespace stacks {
 
 namespace {
 
+// The sizes in a zip directory are only claims. Bound what one entry, and
+// the whole book, may inflate to so a corrupt or hostile EPUB cannot
+// exhaust memory.
+constexpr zip_uint64_t kMaxEntryBytes = 64ull * 1024 * 1024;
+constexpr qint64 kMaxBookBytes = 256ll * 1024 * 1024;
+
 QByteArray readZipEntry(zip_t *archive, const QString &path)
 {
     const QByteArray encoded = path.toUtf8();
     zip_stat_t stat {};
-    if (zip_stat(archive, encoded.constData(), 0, &stat) != 0)
+    zip_stat_init(&stat);
+    if (zip_stat(archive, encoded.constData(), 0, &stat) != 0
+        || !(stat.valid & ZIP_STAT_SIZE) || stat.size > kMaxEntryBytes)
         return {};
 
     zip_file_t *file = zip_fopen(archive, encoded.constData(), 0);
     if (!file)
         return {};
 
-    QByteArray data;
-    data.resize(static_cast<int>(stat.size));
-    const zip_int64_t read = zip_fread(file, data.data(), data.size());
+    QByteArray data(static_cast<qsizetype>(stat.size), Qt::Uninitialized);
+    zip_uint64_t total = 0;
+    while (total < stat.size) {
+        const zip_int64_t read = zip_fread(file, data.data() + total, stat.size - total);
+        if (read <= 0)
+            break;
+        total += zip_uint64_t(read);
+    }
     zip_fclose(file);
-    if (read < 0)
+    if (total != stat.size)
         return {};
-    data.resize(static_cast<int>(read));
     return data;
 }
 
@@ -185,6 +197,7 @@ bool EpubDocument::load(const QString &path, QString *error)
     };
 
     int chapterIndex = 0;
+    qint64 bookBytes = 0;
     QStringList htmlParts;
     QStringList plainParts;
     for (const QString &idref : spine) {
@@ -192,6 +205,17 @@ bool EpubDocument::load(const QString &path, QString *error)
         const QByteArray data = readZipEntry(archive, zipPath);
         if (data.isEmpty())
             continue;
+        bookBytes += data.size();
+        if (bookBytes > kMaxBookBytes) {
+            zip_close(archive);
+            m_chapters.clear();
+            m_passages.clear();
+            m_lastError = QStringLiteral("This EPUB is too large to open (over %1 MB of text).")
+                              .arg(kMaxBookBytes / (1024 * 1024));
+            if (error)
+                *error = m_lastError;
+            return false;
+        }
 
         const QString xhtml = QString::fromUtf8(data);
         const QString fragment = stripToFragment(xhtml);

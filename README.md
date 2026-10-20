@@ -25,6 +25,7 @@ This is the working prototype behind `/root/ideas/stacks/prd.md` and `/root/idea
 | File-to-Kindle converter | PDF, EPUB, TXT, MD, HTML → Kindle-ready EPUB (cover, TOC, nav, clean metadata); runs on a worker thread |
 | Send to Kindle | SMTP delivery to your `@kindle.com` address, plus a hand-off to `amazon.com/sendtokindle` |
 | Focus mode | `⌘\` / `Ctrl+\` collapses both rails to a single page |
+| Appearance | System, Light and Dark themes, persisted locally and switchable without reopening a book |
 | Local-first storage | SQLite + files in place, no network required |
 
 Deliberately deferred to 1.1: on-device transcription (whisper.cpp), OCR, automatic diagrams, and sync. The PRD covers those.
@@ -41,7 +42,8 @@ stacks/
 │   ├── textures/         Paper tooth and film grain, generated
 │   └── samples/          Original sample PDFs and EPUBs
 ├── qml/                  QML shell, reader chrome, palette, diagram canvas
-│   ├── Theme.js          Every colour, face and metric
+│   ├── Theme.qml         Reactive light/dark colours, faces and metrics
+│   ├── ThemePicker.qml   System / Light / Dark appearance switcher
 │   ├── Icon.qml          Vector icon set drawn on a canvas
 │   ├── PillButton.qml    Primary / secondary / ghost buttons
 │   ├── KeyCap.qml        Keyboard cap chip
@@ -134,6 +136,7 @@ cmake --build build -j
 ./build/stacks --open 3        # open a library id directly
 ./build/stacks --query margin  # headless full-text search
 ./build/stacks --data-dir ./scratch-library  # isolated library for testing
+./build/stacks --theme dark    # system, light or dark; saved for next launch
 ```
 
 On a headless machine:
@@ -169,6 +172,13 @@ The test suite covers:
   migrations/edits, and the margin-delete/Kindle-selection UI paths
 - a localhost SMTP server exercising verified STARTTLS and implicit TLS,
   certificate rejection, missing STARTTLS, timeouts, attachment rejection and retry
+- appearance preference persistence, simulated OS theme notifications, live
+  palette switching, primary-button contrast and EPUB recolouring without position loss
+- resource and edge cases: voice recordings removed with their notes, diagram
+  edges deduplicated, scoped per book and following a dragged node, bounded PDF
+  renders, one page per trackpad swipe, EPUB progress reaching 100%, missing
+  book files, HTML → EPUB, Kindle size limits and file names, overlay click
+  handling, and pixel checks that rounded corners stay rounded
 
 SMTP tests use an intentionally public localhost-only key/certificate under
 `tests/fixtures/`. These are test fixtures, never application credentials.
@@ -184,6 +194,18 @@ This configures, builds, runs the Qt tests, runs the QML smoke test, renders wel
 
 ---
 
+## Appearance
+
+Choose **System**, **Light**, or **Dark** in the bottom of the library sidebar.
+System follows OS appearance changes automatically; explicit Light/Dark choices
+override it. `⌘⇧T` / `Ctrl+Shift+T` cycles the three modes, including in focus
+mode. The preference is saved in `<data dir>/appearance.ini`.
+
+The palette covers the desk, rails, dialogs, diagrams, controls and EPUB text.
+Changing it does not reload the book or move its reading position. PDFs retain
+their original page colours. Reactive colour/type/metric tokens live in
+`qml/Theme.qml`.
+
 ## Architecture notes
 
 - **Core is pure C++ and has no UI dependency.** `Library` owns all SQL and indexing; `Database` owns the schema and FTS5 setup. This is the layer that later syncs, migrates, or gets reused by a CLI.
@@ -193,7 +215,9 @@ This configures, builds, runs the Qt tests, runs the QML smoke test, renders wel
 - **Search is FTS5 with a `LIKE` fallback** for SQLite builds that lack FTS5. Query terms are quoted and prefix-matched, so partial words work.
 - **Positions are debounced** in `AppController` (450 ms) so scrolling writes at most a few rows per second.
 - **Navigation and shutdown flush pending positions.** Voice recordings are stopped and saved to the original book before leaving it; conversion workers are joined at shutdown.
-- **Voice capture is intentionally simple.** `VoiceRecorder` writes 16 kHz mono WAV via `QAudioSource`; transcription is a 1.1 integration point for whisper.cpp or the platform speech API.
+- **Voice capture is intentionally simple.** `VoiceRecorder` streams 16 kHz mono WAV to disk via `QAudioSource`, so memory stays flat however long a note runs (recordings stop at two hours); deleting the note deletes its recording. Microphone access is checked first, since macOS otherwise records silence. Transcription is a 1.1 integration point for whisper.cpp or the platform speech API.
+- **Sizes that come from files are bounded.** EPUB entries inflate to at most 64 MB each and 256 MB per book, PDF page bitmaps to 24 MP (8192 px a side), and Kindle attachments to Amazon's 50 MB and the mail server's advertised `SIZE`.
+- **The home shelf is virtualised.** It is a `GridView`, so only the tiles in view exist and memory stays flat as the library grows.
 - **Animation is transform/opacity only.** The rails, palette, and recorder use short eased transitions; the reader itself never animates layout.
 - **The page is owned by QML, the content by C++.** `ReaderItem` paints text and PDF pages only; the paper, its tooth, the bound edge, the running head and the folio are QML layers around it, so the shell can be restyled without touching the renderer.
 
@@ -210,12 +234,14 @@ command palette.
    metadata. An EPUB input is normalised instead of rebuilt: its own text and
    images, navigation, identifiers and package-relative paths are kept; a linked
    nav document is added only when one is missing. The result is written to
-   `<data dir>/kindle/` without overwriting earlier conversions.
+   `<data dir>/kindle/` without overwriting earlier conversions. HTML is reduced
+   to its prose: headings start chapters; scripts, styles and tags are dropped.
 3. **Send** — the EPUB is attached to an email addressed to your
    `@kindle.com` address and handed to Amazon's *Send to Kindle for Email*
    service, which accepts PDF, DOC, DOCX, TXT, RTF, HTM, HTML, images and
    EPUB. Amazon converts it to Kindle format on their side. You can also open
-   `amazon.com/sendtokindle` and drop the file in yourself.
+   `amazon.com/sendtokindle` and drop the file in yourself. Amazon accepts
+   files up to 50 MB by email; larger ones are refused before anything uploads.
 
 The sending account (from address, SMTP host, user, app password) is stored in
 `<data dir>/kindle.json` with owner-only permissions and never leaves the
@@ -235,7 +261,7 @@ moss and violet marking the other kinds of mark), Newsreader for books, Inter
 for UI, JetBrains Mono for metadata, hairline borders, a margin that reads as
 a timeline rather than a card stack, and a keyboard-first command palette.
 
-Everything is defined in `qml/Theme.js` and the shared components
+Everything is defined in `qml/Theme.qml` and the shared components
 (`Icon.qml`, `PillButton.qml`, `KeyCap.qml`, `Cover.qml`), so the shell has
 one place to change.
 
@@ -251,3 +277,31 @@ one place to change.
 | Baseline memory, 1,000 books | < 350 MB |
 
 The prototype is structured to hit these on Linux/Windows/macOS hardware. The main risks to the budget are PDFium page caching, huge EPUB XHTML with complex CSS, and keeping the AI/voice work off the UI thread — all noted in the PRD.
+
+
+### App identity and the reading desk
+
+Stacks now has generated book-stack artwork in the sidebar, on the home screen,
+and as its native application icon. On macOS, CMake creates `build/stacks.app`;
+open it with `open build/stacks.app`. The `./build/stacks` command remains available
+for CLI use. This development bundle loads the checkout's QML, fonts, and sample
+assets and uses build-local dependencies; it is not a distributable installer.
+
+The library workspace includes a continue-reading feature, live book counts,
+sidebar navigation for All books / In progress / Finished, title-and-author
+filtering, PDF/EPUB filters, recent/title/author sorting, and grid/list views.
+Both presentations are virtualised: only visible books and a small scroll
+buffer are instantiated. The filter controls stay in place while results change,
+and shorter windows hide the reading feature to leave more room for books.
+
+The reader has persistent previous/next buttons and a progress footer, a margin
+with annotation counts and keyboard-accessible filters, and narrower side rails
+on smaller windows. Action buttons support keyboard focus, Space/Enter, and
+accessible names. Light, dark, and system appearance update the entire workspace
+without reopening a book. Geometric fallback jackets give local books a
+consistent visual identity.
+
+Artwork provenance and the exact generation prompt are in
+[`assets/branding/README.md`](assets/branding/README.md). New artwork gets a clean,
+anti-aliased tile with `python3 tools/clean-icon-mask.py`; regenerate native icon
+sizes with `bash tools/make-icons.sh` on macOS.

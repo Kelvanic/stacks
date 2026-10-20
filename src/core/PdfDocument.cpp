@@ -11,11 +11,17 @@
 #include <fpdfview.h>
 
 #include <algorithm>
+#include <cmath>
 #include <mutex>
 
 namespace stacks {
 
 namespace {
+// A page bitmap never exceeds this, whatever size the PDF claims for the
+// page: ~24 MP is ~96 MB of pixels, already sharper than any screen.
+constexpr double kMaxRenderPixels = 24.0 * 1024 * 1024;
+constexpr double kMaxRenderSide = 8192.0;
+
 int s_pdfiumRefCount = 0;
 // PDFium requires process-wide serialization, even for different documents.
 std::recursive_mutex s_pdfiumMutex;
@@ -142,10 +148,23 @@ QImage PdfDocument::renderPage(int pageIndex, double scale) const
         return {};
 
     const QSizeF size = pageSize(pageIndex);
+    if (size.isEmpty() || !(scale > 0.0)) {
+        FPDF_ClosePage(page);
+        return {};
+    }
+    const double requested = size.width() * size.height() * scale * scale;
+    if (requested > kMaxRenderPixels)
+        scale *= std::sqrt(kMaxRenderPixels / requested);
+    scale = std::min({scale, kMaxRenderSide / size.width(), kMaxRenderSide / size.height()});
     const int width = std::max(1, qRound(size.width() * scale));
     const int height = std::max(1, qRound(size.height() * scale));
 
     QImage image(width, height, QImage::Format_ARGB32);
+    if (image.isNull()) {
+        // Out of memory: PDFium would otherwise allocate its own buffer.
+        FPDF_ClosePage(page);
+        return {};
+    }
     image.fill(Qt::white);
 
     FPDF_BITMAP bitmap = FPDFBitmap_CreateEx(width, height, FPDFBitmap_BGRA,

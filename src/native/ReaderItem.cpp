@@ -17,6 +17,7 @@
 #include <QWheelEvent>
 
 #include <algorithm>
+#include <cstdlib>
 
 namespace stacks {
 
@@ -61,11 +62,64 @@ ReaderItem::ReaderItem(QQuickItem *parent)
 
 ReaderItem::~ReaderItem() = default;
 
+void ReaderItem::setTextColor(const QColor &color)
+{
+    if (!color.isValid() || m_textColor == color)
+        return;
+    m_textColor = color;
+    applyTextColors();
+    emit appearanceChanged();
+    update();
+}
+
+void ReaderItem::setAccentColor(const QColor &color)
+{
+    if (!color.isValid() || m_accentColor == color)
+        return;
+    m_accentColor = color;
+    applyTextColors();
+    emit appearanceChanged();
+    update();
+}
+
+void ReaderItem::setMutedColor(const QColor &color)
+{
+    if (!color.isValid() || m_mutedColor == color)
+        return;
+    m_mutedColor = color;
+    emit appearanceChanged();
+    update();
+}
+
 void ReaderItem::setAnnotations(const QVariantList &annotations)
 {
     m_annotations = annotations;
+    resolvePassageHighlights();
     emit annotationsChanged();
     update();
+}
+
+void ReaderItem::resolvePassageHighlights()
+{
+    m_passageHighlights.clear();
+    if (!m_textDocument)
+        return;
+    for (const QVariant &value : std::as_const(m_annotations)) {
+        const QVariantMap annotation = value.toMap();
+        if (annotation.value(QStringLiteral("kind")).toString() != QStringLiteral("highlight"))
+            continue;
+        const QString locator = annotation.value(QStringLiteral("locator")).toString();
+        if (!locator.startsWith(QStringLiteral("epub:")) || locator.mid(5).count(QLatin1Char(':')) != 1)
+            continue;
+        for (const Passage &passage : std::as_const(m_epubPassages)) {
+            if (passage.locator != locator)
+                continue;
+            const QTextCursor found = m_textDocument->find(passage.text, QTextCursor(m_textDocument.get()));
+            if (!found.isNull())
+                m_passageHighlights.append({found.selectionStart(), found.selectionEnd()});
+            break;
+        }
+    }
 }
 
 void ReaderItem::setAnnotationsForBook(const QVariantList &annotations)
@@ -137,6 +191,9 @@ void ReaderItem::closeDocument()
     m_pdfImage = QImage();
     m_textDocument.reset();
     m_epubPassages.clear();
+    m_passageHighlights.clear();
+    m_wheelAccumulator = 0;
+    m_pageTurnedThisGesture = false;
     m_scrollY = 0.0;
     m_maxScrollY = 0.0;
     m_page = 0;
@@ -156,6 +213,7 @@ void ReaderItem::closeDocument()
 void ReaderItem::rebuildTextDocument()
 {
     m_textDocument = std::make_unique<QTextDocument>();
+    m_textDocument->setUndoRedoEnabled(false);
     QFont bodyFont(QStringLiteral("Newsreader"));
     if (!QFontDatabase::families().contains(QStringLiteral("Newsreader")))
         bodyFont = QFont(QStringLiteral("Georgia"));
@@ -171,6 +229,35 @@ void ReaderItem::rebuildTextDocument()
         m_textDocument->setHtml(epub.html());
     else
         m_textDocument->setPlainText(QString());
+    applyTextColors();
+    resolvePassageHighlights();
+}
+
+void ReaderItem::applyTextColors()
+{
+    if (!m_textDocument)
+        return;
+    QVector<QPair<int, int>> links;
+    for (QTextBlock block = m_textDocument->begin(); block.isValid(); block = block.next()) {
+        for (auto it = block.begin(); !it.atEnd(); ++it) {
+            const QTextFragment fragment = it.fragment();
+            if (fragment.isValid() && fragment.charFormat().isAnchor())
+                links.append({fragment.position(), fragment.length()});
+        }
+    }
+    // Change only colours: preserve layout, typography, selections and locators.
+    QTextCursor cursor(m_textDocument.get());
+    cursor.select(QTextCursor::Document);
+    QTextCharFormat format;
+    format.setForeground(m_textColor);
+    format.setBackground(Qt::NoBrush);
+    cursor.mergeCharFormat(format);
+    format.setForeground(m_accentColor);
+    for (const auto &link : links) {
+        cursor.setPosition(link.first);
+        cursor.setPosition(link.first + link.second, QTextCursor::KeepAnchor);
+        cursor.mergeCharFormat(format);
+    }
 }
 
 void ReaderItem::layoutTextDocument()
@@ -184,7 +271,10 @@ void ReaderItem::layoutTextDocument()
     const int anchor = restoreLocator.mid(5).toInt();
     const qreal offsetInLine = m_scrollY - yForCharacter(anchor);
     const qreal available = qMax(260.0, width() - 2.0 * kHorizontalMargin);
-    m_textDocument->setTextWidth(available);
+    // setTextWidth() re-lays out the whole book even for an unchanged width,
+    // so a height-only resize must not call it.
+    if (!qFuzzyCompare(m_textDocument->textWidth(), available))
+        m_textDocument->setTextWidth(available);
     m_maxScrollY = qMax(0.0, m_textDocument->size().height() - qMax(120.0, height() - 2.0 * kVerticalMargin));
 
     if (!restoreLocator.isEmpty()) {
@@ -249,7 +339,10 @@ void ReaderItem::emitPosition()
         const int character = std::max(0, m_textDocument->documentLayout()->hitTest(
                                              QPointF(1.0, m_scrollY + 1.0), Qt::FuzzyHit));
         const int total = std::max(1, static_cast<int>(m_textDocument->characterCount()));
-        m_progress = qBound(0.0, double(character) / double(total), 1.0);
+        // Progress follows the top line, which never reaches the last
+        // character; the last screen of a book counts as finished.
+        const bool atEnd = m_maxScrollY > 0.0 && m_scrollY >= m_maxScrollY - 0.5;
+        m_progress = atEnd ? 1.0 : qBound(0.0, double(character) / double(total), 1.0);
         m_locator = QStringLiteral("epub:%1").arg(character);
         emit positionChanged(m_locator, m_progress);
     }
@@ -515,17 +608,40 @@ void ReaderItem::wheelEvent(QWheelEvent *event)
         return;
     }
 
-    const int delta = event->angleDelta().y();
     if (m_format == QStringLiteral("pdf")) {
-        if (delta < 0)
-            nextPage();
-        else if (delta > 0)
-            previousPage();
+        // A wheel notch (120 units) turns one page. A trackpad streams small
+        // deltas, then momentum after the fingers lift; turning a page per
+        // event would race through the book, so a swipe turns one page.
+        const Qt::ScrollPhase phase = event->phase();
+        const bool gesture = phase != Qt::NoScrollPhase;
+        if (phase == Qt::ScrollBegin || phase == Qt::ScrollEnd) {
+            m_wheelAccumulator = 0;
+            m_pageTurnedThisGesture = false;
+        }
+        const int delta = event->angleDelta().y();
+        if (phase == Qt::ScrollMomentum || (gesture && m_pageTurnedThisGesture) || delta == 0) {
+            event->accept();
+            return;
+        }
+        if ((delta > 0) != (m_wheelAccumulator > 0))
+            m_wheelAccumulator = 0; // Changed direction.
+        m_wheelAccumulator += delta;
+        if (std::abs(m_wheelAccumulator) >= 120) {
+            if (m_wheelAccumulator < 0)
+                nextPage();
+            else
+                previousPage();
+            m_wheelAccumulator = 0;
+            m_pageTurnedThisGesture = gesture;
+        }
         event->accept();
         return;
     }
 
-    m_scrollY = qBound(0.0, m_scrollY - delta * 0.9, m_maxScrollY);
+    // Trackpads report exact pixels; wheels report notches.
+    const qreal delta = !event->pixelDelta().isNull() ? event->pixelDelta().y()
+                                                      : event->angleDelta().y() * 0.9;
+    m_scrollY = qBound(0.0, m_scrollY - delta, m_maxScrollY);
     emit scrollChanged();
     emitPosition();
     update();
@@ -534,6 +650,11 @@ void ReaderItem::wheelEvent(QWheelEvent *event)
 
 void ReaderItem::paint(QPainter *painter)
 {
+    const auto accent = [this](int alpha) {
+        QColor color = m_accentColor;
+        color.setAlpha(alpha);
+        return color;
+    };
     painter->setRenderHint(QPainter::Antialiasing, true);
     painter->setRenderHint(QPainter::TextAntialiasing, true);
 
@@ -545,7 +666,7 @@ void ReaderItem::paint(QPainter *painter)
     painter->setCompositionMode(QPainter::CompositionMode_SourceOver);
 
     if (!m_ready) {
-        painter->setPen(QColor(QStringLiteral("#8A8073")));
+        painter->setPen(m_mutedColor);
         painter->setFont(QFont(QStringLiteral("Inter"), 13));
         painter->drawText(QRectF(0, 0, width(), height()), Qt::AlignCenter,
                           QStringLiteral("Open a book to start reading."));
@@ -580,14 +701,14 @@ void ReaderItem::paint(QPainter *painter)
             const QRectF highlight(pageRect.left() + rect.at(0) * scale,
                                    pageRect.top() + rect.at(1) * scale,
                                    rect.at(2) * scale, rect.at(3) * scale);
-            painter->setBrush(QColor(196, 106, 59, 64));
-            painter->setPen(QPen(QColor(196, 106, 59, 150), 1.0));
+            painter->setBrush(accent(64));
+            painter->setPen(QPen(accent(150), 1.0));
             painter->drawRoundedRect(highlight, 2, 2);
         }
 
         if (m_draggingPdf && !m_pdfSelectionRect.isEmpty()) {
-            painter->setBrush(QColor(196, 106, 59, 58));
-            painter->setPen(QPen(QColor(196, 106, 59, 190), 1.0));
+            painter->setBrush(accent(58));
+            painter->setPen(QPen(accent(190), 1.0));
             painter->drawRect(m_pdfSelectionRect);
         }
         return;
@@ -597,7 +718,7 @@ void ReaderItem::paint(QPainter *painter)
         return;
 
     QAbstractTextDocumentLayout::PaintContext context;
-    context.palette.setColor(QPalette::Text, QColor(QStringLiteral("#201C16")));
+    context.palette.setColor(QPalette::Text, m_textColor);
     context.palette.setColor(QPalette::Base, Qt::transparent);
     context.clip = QRectF(-kHorizontalMargin, m_scrollY - kVerticalMargin, width(), height());
 
@@ -627,24 +748,16 @@ void ReaderItem::paint(QPainter *painter)
         if (payload.contains(QLatin1Char('-'))) {
             const QVector<int> pair = parsePair(payload, QLatin1Char('-'));
             if (pair.size() == 2 && pair.at(0) >= 0 && pair.at(1) > pair.at(0))
-                addSelection(pair.at(0), pair.at(1), QColor(196, 106, 59, 58));
-        } else if (payload.count(QLatin1Char(':')) == 1) {
-            for (const Passage &passage : m_epubPassages) {
-                if (passage.locator != locator)
-                    continue;
-                QTextCursor finder(m_textDocument.get());
-                const QTextCursor found = m_textDocument->find(passage.text, finder);
-                if (!found.isNull())
-                    addSelection(found.selectionStart(), found.selectionEnd(), QColor(196, 106, 59, 52));
-                break;
-            }
+                addSelection(pair.at(0), pair.at(1), accent(58));
         }
     }
+    for (const auto &range : std::as_const(m_passageHighlights))
+        addSelection(range.first, range.second, accent(52));
 
     if (m_draggingText && !m_selectedText.isEmpty() && !m_selectionLocator.isEmpty()) {
         const QVector<int> pair = parsePair(m_selectionLocator.mid(5), QLatin1Char('-'));
         if (pair.size() == 2)
-            addSelection(pair.at(0), pair.at(1), QColor(196, 106, 59, 88));
+            addSelection(pair.at(0), pair.at(1), accent(88));
     }
 
     painter->save();

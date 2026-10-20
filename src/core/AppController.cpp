@@ -4,25 +4,73 @@
 #include <QCoreApplication>
 #include <QDesktopServices>
 #include <QDir>
+#include <QEvent>
 #include <QFile>
 #include <QFileInfo>
+#include <QGuiApplication>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QPalette>
 #include <QRegularExpression>
+#include <QSaveFile>
+#include <QSettings>
+#include <QStyleHints>
 #include <QThread>
 #include <QStandardPaths>
 #include <QUrl>
+
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
+#  if QT_CONFIG(permissions)
+#    include <QPermissions>
+#    define STACKS_HAS_PERMISSIONS 1
+#  endif
+#endif
 
 #include <memory>
 
 namespace stacks {
 
+namespace {
+
+#ifdef STACKS_HAS_PERMISSIONS
+const QString kMicrophoneDenied = QStringLiteral(
+    "Stacks can’t use the microphone. Allow it in System Settings → Privacy & Security → Microphone.");
+#endif
+
+// Only recordings Stacks made itself may be deleted along with their note.
+bool isInsideDirectory(const QString &path, const QString &directory)
+{
+    const QString file = QFileInfo(path).canonicalFilePath();
+    const QString root = QFileInfo(directory).canonicalFilePath();
+    return !file.isEmpty() && !root.isEmpty() && file.startsWith(root + QLatin1Char('/'));
+}
+
+} // namespace
+
 AppController::AppController(QObject *parent)
     : QObject(parent)
 {
+    updateSystemTheme();
+    if (auto *application = qobject_cast<QGuiApplication *>(QCoreApplication::instance())) {
+        application->installEventFilter(this);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
+        connect(QGuiApplication::styleHints(), &QStyleHints::colorSchemeChanged,
+                this, [this](Qt::ColorScheme scheme) {
+                    if (scheme == Qt::ColorScheme::Unknown)
+                        updateSystemTheme();
+                    else
+                        applySystemTheme(scheme == Qt::ColorScheme::Dark);
+                });
+#endif
+    }
     m_positionTimer.setSingleShot(true);
     m_positionTimer.setInterval(450);
-    connect(&m_positionTimer, &QTimer::timeout, this, &AppController::flushPosition);
+    // Scrolling reports positions many times a second. Publishing the book
+    // once per pause keeps every pane from re-reading it on each wheel tick.
+    connect(&m_positionTimer, &QTimer::timeout, this, [this]() {
+        flushPosition();
+        emit currentBookChanged();
+    });
     connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this, [this]() {
         flushPosition();
         if (m_recording)
@@ -55,8 +103,7 @@ AppController::~AppController()
         delete m_conversionWorker;
         m_conversionWorker = nullptr;
     }
-    delete m_library;
-    m_library = nullptr;
+    m_library.reset();
 }
 
 void AppController::bindVoiceRecorder()
@@ -69,10 +116,17 @@ void AppController::bindVoiceRecorder()
         m_recordingLevel = level;
         emit recordingLevelChanged();
     });
-    connect(&m_voiceRecorder, &VoiceRecorder::errorOccurred, this, [this](const QString &message) {
-        setStatus(message);
-        emit toast(message);
+    connect(&m_voiceRecorder, &VoiceRecorder::errorOccurred, this, &AppController::notify);
+    connect(&m_voiceRecorder, &VoiceRecorder::captureEnded, this, [this](const QString &reason) {
+        stopVoiceNote(QString());
+        notify(reason);
     });
+}
+
+void AppController::notify(const QString &message)
+{
+    setStatus(message);
+    emit toast(message);
 }
 
 bool AppController::initialize(const QString &sampleDirectory, const QString &dataDirectory)
@@ -83,15 +137,21 @@ bool AppController::initialize(const QString &sampleDirectory, const QString &da
     QDir().mkpath(base);
     QDir().mkpath(QDir(base).filePath(QStringLiteral("voice")));
     QDir().mkpath(QDir(base).filePath(QStringLiteral("kindle")));
+    QSettings appearance(QDir(base).filePath(QStringLiteral("appearance.ini")), QSettings::IniFormat);
+    const QString mode = appearance.value(QStringLiteral("appearance/mode"), QStringLiteral("system")).toString();
+    m_themeMode = mode == QStringLiteral("light") || mode == QStringLiteral("dark") ? mode : QStringLiteral("system");
+    updateSystemTheme();
+    emit appearanceChanged();
     loadKindleSettings();
 
     QString error;
+    m_library.reset();
     if (!m_database.open(QDir(base).filePath(QStringLiteral("library.db")), &error)) {
         setStatus(QStringLiteral("Database error: %1").arg(error));
         return false;
     }
 
-    m_library = new Library(&m_database);
+    m_library = std::make_unique<Library>(&m_database);
     m_library->seedSamples(sampleDirectory);
     refreshBooks();
 
@@ -99,6 +159,53 @@ bool AppController::initialize(const QString &sampleDirectory, const QString &da
                   ? QStringLiteral("Local library ready · full-text search on")
                   : QStringLiteral("Local library ready · search running in fallback mode"));
     return true;
+}
+
+void AppController::setThemeMode(const QString &mode)
+{
+    if (mode != QStringLiteral("system") && mode != QStringLiteral("light") && mode != QStringLiteral("dark"))
+        return;
+    if (mode == m_themeMode)
+        return;
+    if (!m_dataDirectory.isEmpty()) {
+        QSettings settings(QDir(m_dataDirectory).filePath(QStringLiteral("appearance.ini")), QSettings::IniFormat);
+        settings.setValue(QStringLiteral("appearance/mode"), mode);
+        settings.sync();
+        if (settings.status() != QSettings::NoError) {
+            emit toast(QStringLiteral("Could not save the appearance preference."));
+            return;
+        }
+    }
+    m_themeMode = mode;
+    emit appearanceChanged();
+}
+
+bool AppController::eventFilter(QObject *object, QEvent *event)
+{
+    if (event->type() == QEvent::ApplicationPaletteChange)
+        updateSystemTheme();
+    return QObject::eventFilter(object, event);
+}
+
+void AppController::updateSystemTheme()
+{
+    if (!qobject_cast<QGuiApplication *>(QCoreApplication::instance()))
+        return;
+    bool dark = QGuiApplication::palette().color(QPalette::Window).lightnessF() < 0.5;
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
+    const auto scheme = QGuiApplication::styleHints()->colorScheme();
+    if (scheme != Qt::ColorScheme::Unknown)
+        dark = scheme == Qt::ColorScheme::Dark;
+#endif
+    applySystemTheme(dark);
+}
+
+void AppController::applySystemTheme(bool dark)
+{
+    if (m_systemDark != dark) {
+        m_systemDark = dark;
+        emit appearanceChanged();
+    }
 }
 
 void AppController::refreshBooks()
@@ -172,6 +279,13 @@ void AppController::openBook(int bookId)
         setStatus(QStringLiteral("Book not found."));
         return;
     }
+    if (!QFileInfo(book.path).isFile()) {
+        // Moved, renamed or on an unmounted drive: say so instead of opening
+        // an empty reader.
+        notify(QStringLiteral("“%1” is no longer at %2.")
+                   .arg(book.title, QDir::toNativeSeparators(book.path)));
+        return;
+    }
 
     if (m_recording)
         stopVoiceNote(QString());
@@ -223,7 +337,6 @@ void AppController::savePosition(const QString &locator, double progress)
     m_pendingProgress = progress;
     m_currentBook.insert(QStringLiteral("locator"), locator);
     m_currentBook.insert(QStringLiteral("progress"), progress);
-    emit currentBookChanged();
     m_positionTimer.start();
 }
 
@@ -301,7 +414,13 @@ void AppController::deleteAnnotation(int annotationId)
 {
     if (!m_library)
         return;
-    m_library->deleteAnnotation(annotationId);
+    QStringList recordings;
+    if (m_library->deleteAnnotation(annotationId, &recordings)) {
+        for (const QString &path : std::as_const(recordings)) {
+            if (isInsideDirectory(path, voiceDirectory()))
+                QFile::remove(path);
+        }
+    }
     refreshAnnotations();
     setStatus(QStringLiteral("Removed"));
 }
@@ -325,12 +444,29 @@ bool AppController::startVoiceNote()
         return false;
     if (m_recording)
         return true;
-    QString error;
-    if (!m_voiceRecorder.start(voiceDirectory(), &error)) {
-        setStatus(error);
-        emit toast(error);
-        return false;
+#ifdef STACKS_HAS_PERMISSIONS
+    // Without access macOS records silence, so ask first and say why.
+    if (qobject_cast<QGuiApplication *>(QCoreApplication::instance())) {
+        const QMicrophonePermission microphone;
+        switch (qApp->checkPermission(microphone)) {
+        case Qt::PermissionStatus::Undetermined:
+            qApp->requestPermission(microphone, this, [this](const QPermission &permission) {
+                notify(permission.status() == Qt::PermissionStatus::Granted
+                           ? QStringLiteral("Microphone ready. Press record again to start.")
+                           : kMicrophoneDenied);
+            });
+            return false;
+        case Qt::PermissionStatus::Denied:
+            notify(kMicrophoneDenied);
+            return false;
+        case Qt::PermissionStatus::Granted:
+            break;
+        }
     }
+#endif
+    QString error;
+    if (!m_voiceRecorder.start(voiceDirectory(), &error))
+        return false; // The recorder has already reported why.
     setStatus(QStringLiteral("Recording voice note…"));
     return true;
 }
@@ -339,8 +475,8 @@ void AppController::stopVoiceNote(const QString &transcript)
 {
     if (!m_recording)
         return;
-    const int duration = m_voiceRecorder.durationMs();
     const QString path = m_voiceRecorder.stop();
+    const int duration = m_voiceRecorder.durationMs();
     m_recording = false;
     emit recordingChanged();
     if (path.isEmpty()) {
@@ -415,8 +551,9 @@ void AppController::loadKindleSettings()
     m_kindleSettings.insert("smtpHost", QStringLiteral("smtp.gmail.com"));
     m_kindleSettings.insert("smtpPort", 587);
     m_kindleSettings.insert("user", QString());
-    m_kindleSettings.insert("password", QString());
     m_kindleSettings.insert("kindleAddress", QString());
+    m_kindleSettings.insert("hasPassword", false);
+    m_kindlePassword.clear();
 
     QFile file(QDir(m_dataDirectory).filePath(QStringLiteral("kindle.json")));
     if (!file.open(QIODevice::ReadOnly))
@@ -424,14 +561,16 @@ void AppController::loadKindleSettings()
     const QJsonObject object = QJsonDocument::fromJson(file.readAll()).object();
     file.close();
 
+    const int port = object.value("smtpPort").toInt(587);
+    m_kindlePassword = object.value("password").toString();
     m_kindleSettings.insert("fromAddress", object.value("fromAddress").toString());
     m_kindleSettings.insert("smtpHost", object.value("smtpHost").toString().isEmpty()
                                           ? QStringLiteral("smtp.gmail.com")
                                           : object.value("smtpHost").toString());
-    m_kindleSettings.insert("smtpPort", object.value("smtpPort").toInt(587));
+    m_kindleSettings.insert("smtpPort", port >= 1 && port <= 65535 ? port : 587);
     m_kindleSettings.insert("user", object.value("user").toString());
-    m_kindleSettings.insert("password", object.value("password").toString());
     m_kindleSettings.insert("kindleAddress", object.value("kindleAddress").toString());
+    m_kindleSettings.insert("hasPassword", !m_kindlePassword.isEmpty());
 }
 
 void AppController::saveKindleSettings(const QVariantMap &settings)
@@ -445,17 +584,23 @@ void AppController::saveKindleSettings(const QVariantMap &settings)
 
     // An empty password field keeps the one already stored.
     const QString password = settings.value("password").toString().isEmpty()
-                                 ? m_kindleSettings.value("password").toString()
+                                 ? m_kindlePassword
                                  : settings.value("password").toString();
     if (!password.isEmpty())
         object.insert("password", password);
 
-    const QString path = QDir(m_dataDirectory).filePath(QStringLiteral("kindle.json"));
-    QFile file(path);
-    if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        file.write(QJsonDocument(object).toJson(QJsonDocument::Indented));
-        file.close();
-        QFile::setPermissions(path, QFile::ReadOwner | QFile::WriteOwner);
+    // Write atomically and owner-only from the first byte: a failed write
+    // must not truncate the stored account, nor briefly expose the password.
+    QSaveFile file(QDir(m_dataDirectory).filePath(QStringLiteral("kindle.json")));
+    const QByteArray json = QJsonDocument(object).toJson(QJsonDocument::Indented);
+    const bool saved = file.open(QIODevice::WriteOnly)
+        && file.setPermissions(QFile::ReadOwner | QFile::WriteOwner)
+        && file.write(json) == json.size()
+        && file.commit();
+    if (!saved) {
+        file.cancelWriting();
+        emit toast(QStringLiteral("Could not save the Kindle settings: %1").arg(file.errorString()));
+        return;
     }
 
     loadKindleSettings();
@@ -543,9 +688,10 @@ void AppController::convertFileForKindle(const QString &url)
     const QString suffix = QFileInfo(path).suffix().toLower();
     QString format = suffix;
     if (suffix == QStringLiteral("md") || suffix == QStringLiteral("markdown")
-        || suffix == QStringLiteral("txt") || suffix == QStringLiteral("htm")
-        || suffix == QStringLiteral("html")) {
+        || suffix == QStringLiteral("txt")) {
         format = QStringLiteral("txt");
+    } else if (suffix == QStringLiteral("htm") || suffix == QStringLiteral("html")) {
+        format = QStringLiteral("html");
     } else if (suffix == QStringLiteral("pdf")) {
         format = QStringLiteral("pdf");
     } else if (suffix == QStringLiteral("epub")) {
@@ -588,7 +734,7 @@ void AppController::sendConvertedToKindle(const QString &path, const QString &ti
     settings.smtpHost = m_kindleSettings.value("smtpHost").toString();
     settings.smtpPort = m_kindleSettings.value("smtpPort", 587).toInt();
     settings.user = m_kindleSettings.value("user").toString();
-    settings.password = m_kindleSettings.value("password").toString();
+    settings.password = m_kindlePassword;
     settings.kindleAddress = m_kindleSettings.value("kindleAddress").toString();
 
     m_kindleBusy = true;
@@ -603,6 +749,17 @@ void AppController::revealInFolder(const QString &path)
         return;
     const QString directory = QFileInfo(path).absolutePath();
     QDesktopServices::openUrl(QUrl::fromLocalFile(directory));
+}
+
+void AppController::openLocalFile(const QString &path)
+{
+    // QUrl::fromLocalFile keeps '#', '%' and spaces in names intact, which
+    // a hand-built "file://" string does not.
+    if (path.isEmpty() || !QFileInfo(path).isFile()) {
+        notify(QStringLiteral("That file is missing."));
+        return;
+    }
+    QDesktopServices::openUrl(QUrl::fromLocalFile(path));
 }
 
 void AppController::openSendToKindle()
@@ -626,7 +783,7 @@ void AppController::refreshDiagram()
         const QVector<DiagramNode> nodes = m_library->diagramNodes(bookId);
         for (const DiagramNode &node : nodes)
             m_diagramNodes.append(node.toVariant());
-        const QVector<DiagramEdge> edges = m_library->diagramEdges();
+        const QVector<DiagramEdge> edges = m_library->diagramEdges(bookId);
         for (const DiagramEdge &edge : edges)
             m_diagramEdges.append(edge.toVariant());
     }
@@ -645,9 +802,11 @@ int AppController::addDiagramNode(const QString &label, const QString &body, dou
 
 void AppController::moveDiagramNode(int nodeId, double x, double y)
 {
-    if (!m_library)
+    if (!m_library || !m_library->moveDiagramNode(nodeId, x, y))
         return;
-    m_library->moveDiagramNode(nodeId, x, y);
+    // The dragged card already sits at its new place, so update the cached
+    // copy without a change signal: re-announcing the list would rebuild
+    // every card on the canvas after each drag.
     for (QVariant &value : m_diagramNodes) {
         QVariantMap node = value.toMap();
         if (node.value(QStringLiteral("id")).toInt() == nodeId) {
@@ -657,7 +816,6 @@ void AppController::moveDiagramNode(int nodeId, double x, double y)
             break;
         }
     }
-    emit diagramChanged();
 }
 
 void AppController::updateDiagramNode(int nodeId, const QString &label, const QString &body)

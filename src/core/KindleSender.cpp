@@ -1,11 +1,16 @@
 #include "KindleSender.h"
 
+#include <QDateTime>
 #include <QFile>
 #include <QFileInfo>
+#include <QLocale>
 #include <QMimeDatabase>
 #include <QRegularExpression>
 #include <QSslSocket>
+#include <QUrl>
 #include <QUuid>
+
+#include <algorithm>
 
 namespace stacks {
 namespace {
@@ -15,6 +20,20 @@ QString sanitizeHeader(QString value)
     value.replace(QLatin1Char('\r'), QLatin1Char(' '));
     value.replace(QLatin1Char('\n'), QLatin1Char(' '));
     return value.trimmed();
+}
+
+QByteArray base64Lines(const QByteArray &bytes)
+{
+    QByteArray lines;
+    const QByteArray encoded = bytes.toBase64();
+    for (qsizetype i = 0; i < encoded.size(); i += 76)
+        lines += encoded.mid(i, 76) + "\r\n";
+    return lines;
+}
+
+QString megabytes(qint64 bytes)
+{
+    return QString::number(double(bytes) / (1024.0 * 1024.0), 'f', 1);
 }
 
 bool validAddress(const QString &address)
@@ -51,6 +70,17 @@ void KindleSender::send(const Settings &settings, const QString &filePath,
     if (settings.smtpHost.trimmed().isEmpty() || settings.user.isEmpty()
         || settings.password.isEmpty() || settings.smtpPort < 1 || settings.smtpPort > 65535) {
         finish(false, QStringLiteral("Add your SMTP host, port, user and app password first."));
+        return;
+    }
+    const QFileInfo attachment(filePath);
+    if (!attachment.isFile()) {
+        finish(false, QStringLiteral("The attachment could not be read."));
+        return;
+    }
+    if (attachment.size() > kMaxAttachmentBytes) {
+        finish(false, QStringLiteral("Amazon accepts files up to %1 MB by email; this one is %2 MB.")
+                          .arg(kMaxAttachmentBytes / (1024 * 1024))
+                          .arg(megabytes(attachment.size())));
         return;
     }
     m_message = buildMessage(filePath, title, author);
@@ -164,14 +194,23 @@ void KindleSender::authenticate()
         return;
     }
     bool supportsPlain = false;
+    qint64 sizeLimit = 0;
     for (const QString &line : m_replyLines) {
         const QString capability = line.mid(4).toUpper();
-        if (capability.startsWith(QLatin1String("AUTH "))
-            && capability.split(QLatin1Char(' '), Qt::SkipEmptyParts).contains(QStringLiteral("PLAIN")))
+        const QStringList words = capability.split(QLatin1Char(' '), Qt::SkipEmptyParts);
+        if (capability.startsWith(QLatin1String("AUTH ")) && words.contains(QStringLiteral("PLAIN")))
             supportsPlain = true;
+        if (words.size() == 2 && words.first() == QLatin1String("SIZE"))
+            sizeLimit = words.at(1).toLongLong();
     }
     if (!supportsPlain) {
         fail(QStringLiteral("The mail server does not support AUTH PLAIN over TLS."));
+        return;
+    }
+    // Refuse before uploading tens of megabytes the server would reject.
+    if (sizeLimit > 0 && m_message.size() > sizeLimit) {
+        fail(QStringLiteral("The mail server accepts messages up to %1 MB; this one is %2 MB once encoded.")
+                 .arg(megabytes(sizeLimit), megabytes(m_message.size())));
         return;
     }
     QByteArray credentials(1, '\0');
@@ -228,12 +267,12 @@ void KindleSender::handleReply(int code)
         break;
     case State::Data: {
         emit progress(QStringLiteral("Sending the file…"));
-        QString message = m_message;
-        message.replace(QStringLiteral("\r\n."), QStringLiteral("\r\n.."));
-        if (message.startsWith(QLatin1Char('.')))
-            message.prepend(QLatin1Char('.'));
+        // Every line is a header, a boundary or base64, so none starts with
+        // '.' and no dot-stuffing is needed. The socket keeps its own copy.
         m_state = State::Body;
-        m_socket->write(message.toUtf8() + ".\r\n");
+        m_socket->write(m_message);
+        m_socket->write(".\r\n");
+        m_message = QByteArray();
         break;
     }
     case State::Body:
@@ -269,36 +308,66 @@ void KindleSender::finish(bool ok, const QString &message)
         socket->abort();
         socket->deleteLater();
     }
-    m_message.clear();
+    m_message = QByteArray();
     m_settings.password.clear();
     emit finished(ok, message);
 }
 
-QString KindleSender::buildMessage(const QString &filePath, const QString &title, const QString &author) const
+// Builds a 7-bit message: UTF-8 only appears base64- or percent-encoded, so
+// any SMTP server accepts it. The attachment streams in chunks straight into
+// its base64 lines instead of being held in memory several times over.
+QByteArray KindleSender::buildMessage(const QString &filePath, const QString &title, const QString &author) const
 {
     QFile file(filePath);
     if (!file.open(QIODevice::ReadOnly))
         return {};
-    const QByteArray payload = file.readAll();
+
+    const QString name = sanitizeHeader(QFileInfo(filePath).fileName());
+    QByteArray asciiName;
+    for (const QChar c : name)
+        asciiName += (c.unicode() >= 0x20 && c.unicode() < 0x7f && c != QLatin1Char('"') && c != QLatin1Char('\\'))
+            ? char(c.unicode()) : '_';
+    const QByteArray boundary = "----Stacks-" + QUuid::createUuid().toByteArray(QUuid::WithoutBraces);
+    const QByteArray mime = QMimeDatabase().mimeTypeForFile(filePath).name().toLatin1();
+    const QByteArray date = QLocale::c().toString(QDateTime::currentDateTimeUtc(),
+                                                  QStringLiteral("ddd, dd MMM yyyy HH:mm:ss")).toLatin1() + " +0000";
+
+    QByteArray message;
+    message.reserve(qsizetype(file.size() * 4 / 3 + file.size() / 38 + 4096));
+    message += "From: <" + m_settings.fromAddress.toUtf8() + ">\r\n"
+               "To: <" + m_settings.kindleAddress.toUtf8() + ">\r\n"
+               "Subject: =?UTF-8?B?" + sanitizeHeader(title).toUtf8().toBase64() + "?=\r\n"
+               "Date: " + date + "\r\n"
+               "Message-ID: <" + QUuid::createUuid().toByteArray(QUuid::WithoutBraces) + "@stacks.local>\r\n"
+               "MIME-Version: 1.0\r\n"
+               "Content-Type: multipart/mixed; boundary=\"" + boundary + "\"\r\n\r\n";
+    message += "--" + boundary + "\r\n"
+               "Content-Type: text/plain; charset=utf-8\r\n"
+               "Content-Transfer-Encoding: base64\r\n\r\n"
+               + base64Lines(QStringLiteral("Converted with Stacks.\r\n%1 — %2\r\n")
+                                 .arg(sanitizeHeader(title), sanitizeHeader(author)).toUtf8())
+               + "\r\n";
+    message += "--" + boundary + "\r\n"
+               "Content-Type: " + mime + "; name=\"" + asciiName + "\"\r\n"
+               "Content-Transfer-Encoding: base64\r\n"
+               "Content-Disposition: attachment; filename=\"" + asciiName + "\"; filename*=UTF-8''"
+               + QUrl::toPercentEncoding(name) + "\r\n\r\n";
+
+    // Whole 57-byte groups encode to unpadded 76-character lines.
+    constexpr qint64 kChunk = 57 * 1024;
+    while (!file.atEnd()) {
+        const QByteArray encoded = file.read(kChunk).toBase64();
+        if (encoded.isEmpty())
+            break;
+        for (qsizetype i = 0; i < encoded.size(); i += 76) {
+            message.append(encoded.constData() + i, std::min<qsizetype>(76, encoded.size() - i));
+            message += "\r\n";
+        }
+    }
     if (file.error() != QFile::NoError)
         return {};
-    QString name = sanitizeHeader(QFileInfo(filePath).fileName());
-    name.replace(QLatin1Char('"'), QLatin1Char('_'));
-    name.replace(QLatin1Char('\\'), QLatin1Char('_'));
-    const QString boundary = QStringLiteral("----Stacks-%1").arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
-    QString message = QStringLiteral("From: %1\r\nTo: %2\r\nSubject: =?UTF-8?B?%3?=\r\n"
-                                     "MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"%4\"\r\n\r\n")
-                          .arg(m_settings.fromAddress, m_settings.kindleAddress,
-                               QString::fromLatin1(sanitizeHeader(title).toUtf8().toBase64()), boundary);
-    message += QStringLiteral("--%1\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nConverted with Stacks.\r\n%2 — %3\r\n\r\n")
-                   .arg(boundary, sanitizeHeader(title), sanitizeHeader(author));
-    const QString mime = QMimeDatabase().mimeTypeForFile(filePath).name();
-    message += QStringLiteral("--%1\r\nContent-Type: %2; name=\"%3\"\r\nContent-Transfer-Encoding: base64\r\n"
-                              "Content-Disposition: attachment; filename=\"%3\"\r\n\r\n").arg(boundary, mime, name);
-    const QByteArray encoded = payload.toBase64();
-    for (qsizetype i = 0; i < encoded.size(); i += 76)
-        message += QString::fromLatin1(encoded.mid(i, 76)) + QStringLiteral("\r\n");
-    return message + QStringLiteral("\r\n--%1--\r\n").arg(boundary);
+    message += "\r\n--" + boundary + "--\r\n";
+    return message;
 }
 
 } // namespace stacks

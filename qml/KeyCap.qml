@@ -1,5 +1,5 @@
 import QtQuick
-import "Theme.js" as Theme
+import "."
 
 // A keycap, drawn the way a designer would draw one: a soft plate with a
 // hairline, the label in the mono face.

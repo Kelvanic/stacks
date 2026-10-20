@@ -3,6 +3,7 @@
 #include "core/Book.h"
 
 #include <QImage>
+#include <QColor>
 #include <QQuickPaintedItem>
 #include <QTextCursor>
 #include <QVariantList>
@@ -32,6 +33,9 @@ class ReaderItem : public QQuickPaintedItem
     Q_PROPERTY(QVariantList annotations READ annotations WRITE setAnnotations NOTIFY annotationsChanged)
     Q_PROPERTY(qreal scrollY READ scrollY NOTIFY scrollChanged)
     Q_PROPERTY(qreal maxScrollY READ maxScrollY NOTIFY scrollChanged)
+    Q_PROPERTY(QColor textColor READ textColor WRITE setTextColor NOTIFY appearanceChanged)
+    Q_PROPERTY(QColor accentColor READ accentColor WRITE setAccentColor NOTIFY appearanceChanged)
+    Q_PROPERTY(QColor mutedColor READ mutedColor WRITE setMutedColor NOTIFY appearanceChanged)
 
 public:
     explicit ReaderItem(QQuickItem *parent = nullptr);
@@ -51,6 +55,12 @@ public:
     QVariantList annotations() const { return m_annotations; }
     qreal scrollY() const { return m_scrollY; }
     qreal maxScrollY() const { return m_maxScrollY; }
+    QColor textColor() const { return m_textColor; }
+    QColor accentColor() const { return m_accentColor; }
+    QColor mutedColor() const { return m_mutedColor; }
+    void setTextColor(const QColor &color);
+    void setAccentColor(const QColor &color);
+    void setMutedColor(const QColor &color);
 
     void setAnnotations(const QVariantList &annotations);
 
@@ -69,6 +79,7 @@ signals:
     void selectionChanged();
     void scrollChanged();
     void annotationsChanged();
+    void appearanceChanged();
     void errorOccurred(const QString &message);
 
 protected:
@@ -80,6 +91,7 @@ protected:
 
 private:
     void rebuildTextDocument();
+    void applyTextColors();
     void layoutTextDocument();
     void renderPdfPage();
     void emitPosition();
@@ -87,6 +99,7 @@ private:
     qreal yForCharacter(int position) const;
     int characterAt(const QPointF &point) const;
     QRectF pageRectInItem() const;
+    void resolvePassageHighlights();
 
     QString m_filePath;
     QString m_format;
@@ -98,12 +111,18 @@ private:
     QString m_selectedText;
     QString m_selectionLocator;
     QVariantList m_annotations;
+    QColor m_textColor = QColor(QStringLiteral("#211C16"));
+    QColor m_accentColor = QColor(QStringLiteral("#C46A3B"));
+    QColor m_mutedColor = QColor(QStringLiteral("#8A8073"));
 
     std::unique_ptr<PdfDocument> m_pdf;
     QImage m_pdfImage;
 
     std::unique_ptr<QTextDocument> m_textDocument;
     QVector<Passage> m_epubPassages;
+    // Character ranges of paragraph highlights, found once per annotation
+    // change rather than by searching the whole book on every paint.
+    QVector<QPair<int, int>> m_passageHighlights;
     qreal m_scrollY = 0.0;
     qreal m_maxScrollY = 0.0;
     bool m_draggingText = false;
@@ -111,6 +130,8 @@ private:
     QPointF m_dragStart;
     QRectF m_pdfSelectionRect;
     bool m_draggingPdf = false;
+    int m_wheelAccumulator = 0;
+    bool m_pageTurnedThisGesture = false;
 };
 
 } // namespace stacks

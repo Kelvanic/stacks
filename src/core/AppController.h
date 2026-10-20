@@ -11,6 +11,8 @@
 #include <QVariantList>
 #include <QVariantMap>
 
+#include <memory>
+
 class QThread;
 
 namespace stacks {
@@ -35,6 +37,8 @@ class AppController : public QObject
     Q_PROPERTY(bool kindleBusy READ kindleBusy NOTIFY kindleChanged)
     Q_PROPERTY(QString kindleStatus READ kindleStatus NOTIFY kindleChanged)
     Q_PROPERTY(QString kindleDirectory READ kindleDirectory NOTIFY kindleChanged)
+    Q_PROPERTY(QString themeMode READ themeMode WRITE setThemeMode NOTIFY appearanceChanged)
+    Q_PROPERTY(bool darkTheme READ darkTheme NOTIFY appearanceChanged)
 
 public:
     explicit AppController(QObject *parent = nullptr);
@@ -54,6 +58,10 @@ public:
     QString status() const { return m_status; }
     QString dataDirectory() const { return m_dataDirectory; }
     bool ftsAvailable() const { return m_library && m_library->ftsAvailable(); }
+    QString themeMode() const { return m_themeMode; }
+    bool darkTheme() const { return m_themeMode == QStringLiteral("dark")
+        || (m_themeMode == QStringLiteral("system") && m_systemDark); }
+    Q_INVOKABLE void setThemeMode(const QString &mode);
 
     Q_INVOKABLE void importBook(const QString &url);
     Q_INVOKABLE void seedSampleLibrary();
@@ -87,6 +95,7 @@ public:
     Q_INVOKABLE void sendConvertedToKindle(const QString &path, const QString &title, const QString &author);
     Q_INVOKABLE void saveKindleSettings(const QVariantMap &settings);
     Q_INVOKABLE void revealInFolder(const QString &path);
+    Q_INVOKABLE void openLocalFile(const QString &path);
     Q_INVOKABLE void openSendToKindle();
     Q_INVOKABLE void clearKindleResults();
 
@@ -122,6 +131,10 @@ signals:
     void statusChanged();
     void toast(const QString &message);
     void kindleChanged();
+    void appearanceChanged();
+
+protected:
+    bool eventFilter(QObject *object, QEvent *event) override;
 
 private:
     void refreshBooks();
@@ -130,9 +143,12 @@ private:
     void setStatus(const QString &status);
     int pageForLocator(const QString &locator) const;
     void flushPosition();
+    void updateSystemTheme();
+    void applySystemTheme(bool dark);
+    void notify(const QString &message);
 
     Database m_database;
-    Library *m_library = nullptr;
+    std::unique_ptr<Library> m_library;
 
     QVariantList m_books;
     QVariantMap m_currentBook;
@@ -145,12 +161,15 @@ private:
     QString m_status;
     QString m_dataDirectory;
     QString m_pendingLocator;
+    QString m_themeMode = QStringLiteral("system");
+    bool m_systemDark = false;
 
     VoiceRecorder m_voiceRecorder;
     KindleSender *m_kindleSender = nullptr;
     QThread *m_conversionWorker = nullptr;
     QVariantList m_kindleResults;
-    QVariantMap m_kindleSettings;
+    QVariantMap m_kindleSettings; // Exposed to QML, so it never carries the password.
+    QString m_kindlePassword;
     bool m_kindleBusy = false;
     QString m_kindleStatus;
     bool m_recording = false;

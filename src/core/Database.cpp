@@ -234,6 +234,13 @@ bool Database::migrate(QString *error)
         "CREATE INDEX IF NOT EXISTS idx_diagram_nodes_book ON diagram_nodes(book_id)"));
     run(QStringLiteral(
         "CREATE INDEX IF NOT EXISTS idx_diagram_edges_from ON diagram_edges(from_node)"));
+    // Older builds could store the same connection twice, or once in each
+    // direction. Keep the first of each pair and drop any edge whose node is gone.
+    run(QStringLiteral(
+        "DELETE FROM diagram_edges WHERE id NOT IN ("
+        "  SELECT MIN(id) FROM diagram_edges GROUP BY MIN(from_node, to_node), MAX(from_node, to_node))"
+        " OR from_node NOT IN (SELECT id FROM diagram_nodes)"
+        " OR to_node NOT IN (SELECT id FROM diagram_nodes)"));
 
     if (!run(QStringLiteral(
             "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '2')")))

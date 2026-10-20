@@ -195,11 +195,11 @@ void TestCore::testDiagrams()
     QCOMPARE(node->x, 200.0);
     QCOMPARE(node->y, 210.0);
 
-    const QVector<DiagramEdge> edges = m_library->diagramEdges();
+    const QVector<DiagramEdge> edges = m_library->diagramEdges(m_epubBookId);
     QCOMPARE(edges.size(), 1);
     QCOMPARE(edges.first().label, QStringLiteral("produces"));
     QVERIFY(m_library->deleteDiagramEdge(edge));
-    QVERIFY(m_library->diagramEdges().isEmpty());
+    QVERIFY(m_library->diagramEdges(m_epubBookId).isEmpty());
 
     // A default (null) label must not trip the NOT NULL constraint.
     const int third = m_library->addDiagramNode(m_epubBookId, QStringLiteral("Voice"),
@@ -207,7 +207,7 @@ void TestCore::testDiagrams()
     QVERIFY(third > 0);
     const int plainEdge = m_library->addDiagramEdge(second, third);
     QVERIFY(plainEdge > 0);
-    const QVector<DiagramEdge> plainEdges = m_library->diagramEdges();
+    const QVector<DiagramEdge> plainEdges = m_library->diagramEdges(m_epubBookId);
     QCOMPARE(plainEdges.size(), 1);
     QVERIFY(plainEdges.first().label.isEmpty());
     QVERIFY(m_library->deleteDiagramEdge(plainEdge));

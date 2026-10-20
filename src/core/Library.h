@@ -4,6 +4,7 @@
 #include "Database.h"
 
 #include <QString>
+#include <QStringList>
 #include <QVector>
 
 namespace stacks {
@@ -25,7 +26,9 @@ public:
                       const QString &quote, const QString &note, int page = 0,
                       const QString &color = QStringLiteral("#C46A3B"));
     bool updateAnnotation(int annotationId, const QString &note, const QString &quote);
-    bool deleteAnnotation(int annotationId);
+    // Also drops the note's voice recording rows; their audio file paths are
+    // returned so the caller can remove the files it owns.
+    bool deleteAnnotation(int annotationId, QStringList *recordingPaths = nullptr);
 
     int addVoiceNote(int bookId, int annotationId, const QString &path,
                      int durationMs, const QString &transcript);
@@ -38,7 +41,9 @@ public:
     bool updateDiagramNode(int nodeId, const QString &label, const QString &body);
     bool deleteDiagramNode(int nodeId);
 
-    QVector<DiagramEdge> diagramEdges() const;
+    // Edges between the nodes visible for this book (its own and shared ones).
+    QVector<DiagramEdge> diagramEdges(int bookId) const;
+    // Connecting two already connected nodes returns the existing edge.
     int addDiagramEdge(int fromNode, int toNode, const QString &label = QString());
     bool deleteDiagramEdge(int edgeId);
 
