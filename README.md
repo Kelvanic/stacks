@@ -253,8 +253,10 @@ command palette.
    files up to 50 MB by email; larger ones are refused before anything uploads.
 
 The sending account (from address, SMTP host, user, app password) is stored in
-`<data dir>/kindle.json` with owner-only permissions and never leaves the
-machine except as the mail it sends. An app password is the right credential
+`<data dir>/kindle.json` with owner-only permissions on macOS/Linux. Windows
+protects the password with per-user DPAPI encryption rather than relying on
+POSIX mode bits; existing Windows plaintext files migrate on the next save.
+The credentials never leave the machine except as part of the SMTP connection. An app password is the right credential
 here — for Gmail, enable 2FA and create one under *App passwords*.
 
 SMTP requires verified TLS: STARTTLS on the configured port, or implicit TLS

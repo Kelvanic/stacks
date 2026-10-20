@@ -27,6 +27,10 @@
 #endif
 
 #include <memory>
+#ifdef Q_OS_WIN
+#  include <windows.h>
+#  include <wincrypt.h>
+#endif
 
 namespace stacks {
 
@@ -35,6 +39,37 @@ namespace {
 #ifdef STACKS_HAS_PERMISSIONS
 const QString kMicrophoneDenied = QStringLiteral(
     "Stacks can’t use the microphone. Allow it in System Settings → Privacy & Security → Microphone.");
+#endif
+
+#ifdef Q_OS_WIN
+// POSIX mode bits do not restrict Windows ACLs. Keep the credential bound to
+// the current Windows account with DPAPI instead of writing a plaintext secret.
+QString protectPassword(const QString &password)
+{
+    QByteArray bytes = password.toUtf8();
+    DATA_BLOB input {static_cast<DWORD>(bytes.size()), reinterpret_cast<BYTE *>(bytes.data())};
+    DATA_BLOB output {};
+    if (!CryptProtectData(&input, L"Stacks SMTP password", nullptr, nullptr, nullptr,
+                          CRYPTPROTECT_UI_FORBIDDEN, &output))
+        return {};
+    const QByteArray protectedBytes(reinterpret_cast<const char *>(output.pbData), output.cbData);
+    LocalFree(output.pbData);
+    return QString::fromLatin1(protectedBytes.toBase64());
+}
+
+QString unprotectPassword(const QString &encoded)
+{
+    QByteArray bytes = QByteArray::fromBase64(encoded.toLatin1());
+    DATA_BLOB input {static_cast<DWORD>(bytes.size()), reinterpret_cast<BYTE *>(bytes.data())};
+    DATA_BLOB output {};
+    if (!CryptUnprotectData(&input, nullptr, nullptr, nullptr, nullptr,
+                            CRYPTPROTECT_UI_FORBIDDEN, &output))
+        return {};
+    const QString password = QString::fromUtf8(reinterpret_cast<const char *>(output.pbData), output.cbData);
+    SecureZeroMemory(output.pbData, output.cbData);
+    LocalFree(output.pbData);
+    return password;
+}
 #endif
 
 // Only recordings Stacks made itself may be deleted along with their note.
@@ -562,7 +597,13 @@ void AppController::loadKindleSettings()
     file.close();
 
     const int port = object.value("smtpPort").toInt(587);
+#ifdef Q_OS_WIN
+    m_kindlePassword = object.contains("passwordProtected")
+        ? unprotectPassword(object.value("passwordProtected").toString())
+        : object.value("password").toString(); // Legacy files migrate on next save.
+#else
     m_kindlePassword = object.value("password").toString();
+#endif
     m_kindleSettings.insert("fromAddress", object.value("fromAddress").toString());
     m_kindleSettings.insert("smtpHost", object.value("smtpHost").toString().isEmpty()
                                           ? QStringLiteral("smtp.gmail.com")
@@ -586,8 +627,18 @@ void AppController::saveKindleSettings(const QVariantMap &settings)
     const QString password = settings.value("password").toString().isEmpty()
                                  ? m_kindlePassword
                                  : settings.value("password").toString();
-    if (!password.isEmpty())
+    if (!password.isEmpty()) {
+#ifdef Q_OS_WIN
+        const QString protectedPassword = protectPassword(password);
+        if (protectedPassword.isEmpty()) {
+            emit toast(QStringLiteral("Windows could not protect the Kindle password. Settings were not saved."));
+            return;
+        }
+        object.insert("passwordProtected", protectedPassword);
+#else
         object.insert("password", password);
+#endif
+    }
 
     // Write atomically and owner-only from the first byte: a failed write
     // must not truncate the stored account, nor briefly expose the password.

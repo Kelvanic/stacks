@@ -94,6 +94,9 @@ target_link_libraries(stacks_core PUBLIC
     Qt6::Core Qt6::Gui Qt6::Sql Qt6::Multimedia Qt6::Network Qt6::Xml
     pdfium ${STACKS_ZIP_TARGET} ZLIB::ZLIB
 )
+if(WIN32)
+    target_link_libraries(stacks_core PUBLIC crypt32)
+endif()
 set_target_properties(stacks_core PROPERTIES
     BUILD_RPATH "${PDFIUM_LIBRARY_DIR}"
 )
@@ -141,7 +144,14 @@ if(STACKS_BUNDLED_RESOURCES)
         PREFIX "/stacks"
         BASE "${CMAKE_CURRENT_SOURCE_DIR}"
         FILES ${STACKS_UI_FILES} ${STACKS_FONT_FILES} ${STACKS_TEXTURE_FILES}
-              qml/qmldir assets/branding/stacks-icon.png
+              qml/qmldir
+    )
+    # Qt keeps a resource alias on source files already used in another qrc.
+    # Give the shared app/brand artwork its own prefix, preserving that alias.
+    qt_add_resources(stacks "stacks_ui_branding"
+        PREFIX "/stacks/assets/branding"
+        BASE "assets/branding"
+        FILES assets/branding/stacks-icon.png
     )
     target_compile_definitions(stacks PRIVATE STACKS_BUNDLED_RESOURCES)
 endif()
@@ -194,6 +204,7 @@ if(BUILD_TESTING)
     foreach(test_target stacks_tests stacks_regression_tests stacks_smtp_tests)
         set_target_properties(${test_target} PROPERTIES BUILD_RPATH "${PDFIUM_LIBRARY_DIR}")
         if(WIN32)
+            set_target_properties(${test_target} PROPERTIES WIN32_EXECUTABLE FALSE)
             add_custom_command(TARGET ${test_target} POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "$<TARGET_FILE:pdfium>" "$<TARGET_FILE_DIR:${test_target}>")
         endif()

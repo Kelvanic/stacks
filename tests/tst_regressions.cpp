@@ -972,15 +972,27 @@ void TestRegressions::kindlePasswordStaysOutOfQml()
     QCOMPARE(controller.kindleSettings().value("smtpPort").toInt(), 465);
 
     const QString json = dir.filePath(QStringLiteral("kindle.json"));
+#ifndef Q_OS_WIN
     const QFile::Permissions others = QFile::ReadGroup | QFile::WriteGroup | QFile::ReadOther | QFile::WriteOther;
     QCOMPARE(QFile::permissions(json) & others, QFile::Permissions());
+#endif
 
     // Saving with an empty password field keeps the stored one.
     controller.saveKindleSettings({{"fromAddress", "me@example.com"}, {"user", "me"}, {"password", ""},
                                    {"kindleAddress", "me@kindle.com"}, {"smtpPort", 465}});
     QFile file(json);
     QVERIFY(file.open(QIODevice::ReadOnly));
-    QVERIFY(file.readAll().contains("secret"));
+    const QByteArray stored = file.readAll();
+#ifdef Q_OS_WIN
+    QVERIFY(!stored.contains("secret"));
+    QVERIFY(stored.contains("passwordProtected"));
+    // A new controller must decrypt the credential as this Windows user.
+    AppController reopened;
+    QVERIFY(reopened.initialize(samples, dir.path()));
+    QVERIFY(reopened.kindleSettings().value("hasPassword").toBool());
+#else
+    QVERIFY(stored.contains("secret"));
+#endif
     QVERIFY(controller.kindleSettings().value("hasPassword").toBool());
 }
 

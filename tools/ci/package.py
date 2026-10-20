@@ -120,6 +120,14 @@ def windows_package(stage, out, name, qt, version):
         destination.mkdir(parents=True, exist_ok=True)
         shutil.copy2(copyright_file, destination)
     run(qt / "bin" / "windeployqt.exe", "--release", "--compiler-runtime", "--qmldir", ROOT / "qml", "--dir", stage, stage / "stacks.exe")
+    # windeployqt can copy only the redistributable installer. Portable ZIPs
+    # also need the actual redistributable CRT DLLs, not a runner-global runtime.
+    runtime = Path(os.environ["VCToolsRedistDir"]) / "x64/Microsoft.VC143.CRT"
+    crt_dlls = list(runtime.glob("*.dll"))
+    if not crt_dlls:
+        raise RuntimeError(f"MSVC redistributable DLLs are missing: {runtime}")
+    for dll in crt_dlls:
+        shutil.copy2(dll, stage)
     # Qt/SDK tools may otherwise leave absolute developer paths in their config.
     (stage / "qt.conf").write_text("[Paths]\nPrefix=.\nPlugins=.\nQmlImports=qml\n", encoding="utf-8")
     shutil.make_archive(str(out / name), "zip", stage.parent, stage.name)
@@ -133,6 +141,30 @@ def windows_package(stage, out, name, qt, version):
     run(makensis, "/V3", script)
 
 
+def linux_qmake_overlay(qt, work):
+    # linuxdeploy's SQL deployer has no driver filter and otherwise tries to
+    # bundle optional Mimer/Oracle/Postgres client libraries. Present a temporary
+    # plugin view containing only SQLite, without changing the cached Qt SDK.
+    plugins = work / "qt-plugins"
+    plugins.mkdir()
+    for source in (qt / "plugins").iterdir():
+        if source.name != "sqldrivers":
+            (plugins / source.name).symlink_to(source, target_is_directory=source.is_dir())
+    (plugins / "sqldrivers").mkdir()
+    (plugins / "sqldrivers/libqsqlite.so").symlink_to(qt / "plugins/sqldrivers/libqsqlite.so")
+    wrapper = work / "qmake-for-deployment"
+    wrapper.write_text(
+        "#!/usr/bin/env python3\nimport subprocess,sys\n"
+        f"real = {str(qt / 'bin/qmake')!r}\nplugins = {str(plugins)!r}\n"
+        "if sys.argv[1:] == ['-query', 'QT_INSTALL_PLUGINS']:\n    print(plugins)\n"
+        "elif sys.argv[1:] == ['-query']:\n"
+        "    output = subprocess.check_output([real, '-query'], text=True)\n"
+        "    print('\\n'.join('QT_INSTALL_PLUGINS:' + plugins if line.startswith('QT_INSTALL_PLUGINS:') else line for line in output.splitlines()))\n"
+        "else:\n    sys.exit(subprocess.call([real, *sys.argv[1:]]))\n")
+    wrapper.chmod(0o755)
+    return wrapper
+
+
 def linux_package(stage, out, name, qt, version):
     tools = ROOT / "build-dependencies"
     deploy = download(LOCK["linuxdeploy"], tools / "linuxdeploy-x86_64.AppImage")
@@ -140,7 +172,8 @@ def linux_package(stage, out, name, qt, version):
     deploy.chmod(0o755)
     plugin.chmod(0o755)
     env = os.environ.copy()
-    env.update(APPIMAGE_EXTRACT_AND_RUN="1", QMAKE=str(qt / "bin/qmake"),
+    qmake = linux_qmake_overlay(qt, stage.parent)
+    env.update(APPIMAGE_EXTRACT_AND_RUN="1", QMAKE=str(qmake),
                QML_SOURCES_PATHS=str(ROOT / "qml"), EXTRA_PLATFORM_PLUGINS="libqoffscreen.so",
                NO_STRIP="1", ARCH="x86_64", VERSION=version, OUTPUT=str(out / f"{name}.AppImage"))
     run(deploy, "--appdir", stage, "--plugin", "qt", "--output", "appimage", env=env)
