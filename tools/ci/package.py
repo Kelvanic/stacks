@@ -73,7 +73,12 @@ def macho_dependencies(output):
 
 def mac_package(stage, out, name, qt):
     app = stage / "stacks.app"
-    run(qt / "bin" / "macdeployqt", app, f"-qmldir={ROOT / 'qml'}", "-always-overwrite", "-no-strip", "-verbose=2")
+    # Native deploy tools normally include only cocoa/windows. Include the
+    # offscreen platform explicitly for the shipped CLI/screenshot mode too.
+    offscreen = app / "Contents/PlugIns/platforms/libqoffscreen.dylib"
+    offscreen.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(qt / "plugins/platforms/libqoffscreen.dylib", offscreen)
+    run(qt / "bin" / "macdeployqt", app, f"-qmldir={ROOT / 'qml'}", f"-executable={offscreen}", "-always-overwrite", "-no-strip", "-verbose=2")
     # Only SQLite is used. SDK builds can carry optional ODBC/Postgres/Mimer
     # drivers pointing to databases on the Qt build machine, which must not ship.
     sql_drivers = app / "Contents/PlugIns/sqldrivers"
@@ -128,7 +133,10 @@ def windows_package(stage, out, name, qt, version):
         destination = stage / "resources" / "licenses" / "vcpkg" / copyright_file.parent.name
         destination.mkdir(parents=True, exist_ok=True)
         shutil.copy2(copyright_file, destination)
-    run(qt / "bin" / "windeployqt.exe", "--release", "--compiler-runtime", "--qmldir", ROOT / "qml", "--dir", stage, stage / "stacks.exe")
+    offscreen = stage / "platforms/qoffscreen.dll"
+    offscreen.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(qt / "plugins/platforms/qoffscreen.dll", offscreen)
+    run(qt / "bin" / "windeployqt.exe", "--release", "--compiler-runtime", "--qmldir", ROOT / "qml", "--dir", stage, stage / "stacks.exe", offscreen)
     # windeployqt can copy only the redistributable installer. Portable ZIPs
     # also need the actual redistributable CRT DLLs, not a runner-global runtime.
     runtime = Path(os.environ["VCToolsRedistDir"]) / "x64/Microsoft.VC143.CRT"

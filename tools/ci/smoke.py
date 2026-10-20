@@ -23,6 +23,7 @@ def isolated_environment():
     else:
         env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
     env.update(QT_QPA_PLATFORM="offscreen", QT_QUICK_BACKEND="software", QT_QUICK_CONTROLS_STYLE="Basic",
+               QT_FORCE_STDERR_LOGGING="1",
                STACKS_TEST_MODE="1", STACKS_REQUIRE_BUNDLED_RESOURCES="1", APPIMAGE_EXTRACT_AND_RUN="1")
     return env
 
