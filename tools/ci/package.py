@@ -61,6 +61,30 @@ def write_build_info(data_dir, target, version, qt):
 def mac_package(stage, out, name, qt):
     app = stage / "stacks.app"
     run(qt / "bin" / "macdeployqt", app, f"-qmldir={ROOT / 'qml'}", "-always-overwrite", "-no-strip", "-verbose=2")
+    # Only SQLite is used. SDK builds can carry optional ODBC/Postgres/Mimer
+    # drivers pointing to databases on the Qt build machine, which must not ship.
+    sql_drivers = app / "Contents/PlugIns/sqldrivers"
+    for driver in sql_drivers.glob("*.dylib"):
+        if driver.name != "libqsqlite.dylib":
+            driver.unlink()
+    binaries = []
+    replacements = {}
+    for path in app.rglob("*"):
+        if path.is_file() and not path.is_symlink() and "Mach-O" in subprocess.check_output(["file", "-b", str(path)], text=True):
+            binaries.append(path)
+            if path.parent == app / "Contents/Frameworks" and path.suffix == ".dylib":
+                identity = subprocess.check_output(["otool", "-D", str(path)], text=True).splitlines()
+                new_id = f"@rpath/{path.name}"
+                replacements[str(path)] = new_id
+                if len(identity) > 1:
+                    replacements[identity[1].strip()] = new_id
+                run("install_name_tool", "-id", new_id, path)
+    for path in binaries:
+        deps = subprocess.check_output(["otool", "-L", str(path)], text=True).splitlines()[1:]
+        for line in deps:
+            old = line.strip().split(" (", 1)[0]
+            if old in replacements and old != replacements[old]:
+                run("install_name_tool", "-change", old, replacements[old], path)
     app = app.rename(stage / "Stacks.app")
     run("codesign", "--force", "--deep", "--sign", "-", app)
     run("codesign", "--verify", "--deep", "--strict", app)
@@ -70,9 +94,12 @@ def mac_package(stage, out, name, qt):
             continue
         if "Mach-O" not in subprocess.check_output(["file", "-b", str(path)], text=True):
             continue
+        identity = subprocess.check_output(["otool", "-D", str(path)], text=True).splitlines()[1:]
         deps = subprocess.check_output(["otool", "-L", str(path)], text=True).splitlines()[1:]
         for line in deps:
             dependency = line.strip().split(" (", 1)[0]
+            if dependency in identity: # A dylib's own ID is not a loaded dependency.
+                continue
             if dependency.startswith("/") and not dependency.startswith(("/System/Library/", "/usr/lib/")):
                 raise RuntimeError(f"Non-relocatable dependency in {path}: {dependency}")
     run("ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", app, out / f"{name}.zip")

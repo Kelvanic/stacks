@@ -20,7 +20,11 @@ set(CMAKE_INCLUDE_CURRENT_DIR ON)
 
 include(CTest)
 find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Quick QuickControls2 Sql Multimedia Network Xml)
-find_package(libzip CONFIG QUIET)
+# Ubuntu 22.04's libzip config imports optional zipcmp/zipmerge tools even
+# when only libzip-dev is installed. pkg-config avoids that broken config.
+if(WIN32 OR APPLE)
+    find_package(libzip CONFIG QUIET)
+endif()
 if(TARGET libzip::zip)
     set(STACKS_ZIP_TARGET libzip::zip)
 else()
@@ -168,7 +172,7 @@ if(BUILD_TESTING)
     qt_add_executable(stacks_tests tests/tst_core.cpp)
     target_link_libraries(stacks_tests PRIVATE stacks_native Qt6::Quick Qt6::Test)
     target_compile_definitions(stacks_tests PRIVATE STACKS_SAMPLE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets/samples")
-    add_test(NAME stacks_core COMMAND stacks_tests)
+    add_test(NAME stacks_core COMMAND stacks_tests -o "${CMAKE_CURRENT_BINARY_DIR}/core-results.txt,txt" -o -,txt)
     set_tests_properties(stacks_core PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;STACKS_TEST_MODE=1")
 
     qt_add_executable(stacks_regression_tests tests/tst_regressions.cpp)
@@ -177,7 +181,7 @@ if(BUILD_TESTING)
         STACKS_SAMPLE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets/samples"
         STACKS_QML_DIR="${CMAKE_CURRENT_SOURCE_DIR}/qml"
     )
-    add_test(NAME stacks_regressions COMMAND stacks_regression_tests)
+    add_test(NAME stacks_regressions COMMAND stacks_regression_tests -o "${CMAKE_CURRENT_BINARY_DIR}/regression-results.txt,txt" -o -,txt)
     set_tests_properties(stacks_regressions PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;QT_QUICK_CONTROLS_STYLE=Basic;STACKS_TEST_MODE=1"
     )
@@ -185,7 +189,7 @@ if(BUILD_TESTING)
     qt_add_executable(stacks_smtp_tests tests/tst_smtp.cpp)
     target_link_libraries(stacks_smtp_tests PRIVATE stacks_core Qt6::Test)
     target_compile_definitions(stacks_smtp_tests PRIVATE STACKS_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
-    add_test(NAME stacks_smtp COMMAND stacks_smtp_tests)
+    add_test(NAME stacks_smtp COMMAND stacks_smtp_tests -o "${CMAKE_CURRENT_BINARY_DIR}/smtp-results.txt,txt" -o -,txt)
 
     foreach(test_target stacks_tests stacks_regression_tests stacks_smtp_tests)
         set_target_properties(${test_target} PROPERTIES BUILD_RPATH "${PDFIUM_LIBRARY_DIR}")
