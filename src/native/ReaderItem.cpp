@@ -117,10 +117,10 @@ bool ReaderItem::load(const QString &path, const QString &format, const QString 
         m_ready = true;
         setCursor(Qt::IBeamCursor);
         rebuildTextDocument();
-        if (!locator.isEmpty())
-            goToLocator(locator);
         emit documentChanged();
         layoutTextDocument();
+        if (!locator.isEmpty())
+            goToLocator(locator);
         emitPosition();
         update();
         return true;
@@ -148,6 +148,8 @@ void ReaderItem::closeDocument()
     m_selectedText.clear();
     m_selectionLocator.clear();
     m_pdfSelectionRect = QRectF();
+    emit documentChanged();
+    emit selectionChanged();
     update();
 }
 
@@ -176,7 +178,11 @@ void ReaderItem::layoutTextDocument()
     if (!m_textDocument)
         return;
 
-    const QString restoreLocator = epubLocatorAtTop();
+    // Keep one logical anchor throughout a rail animation instead of repeatedly
+    // rounding the top hit-test backwards to the start of a newly wrapped line.
+    const QString restoreLocator = m_locator.isEmpty() ? epubLocatorAtTop() : m_locator;
+    const int anchor = restoreLocator.mid(5).toInt();
+    const qreal offsetInLine = m_scrollY - yForCharacter(anchor);
     const qreal available = qMax(260.0, width() - 2.0 * kHorizontalMargin);
     m_textDocument->setTextWidth(available);
     m_maxScrollY = qMax(0.0, m_textDocument->size().height() - qMax(120.0, height() - 2.0 * kVerticalMargin));
@@ -187,7 +193,7 @@ void ReaderItem::layoutTextDocument()
             bool ok = false;
             const int position = parts.first().toInt(&ok);
             if (ok)
-                m_scrollY = qBound(0.0, yForCharacter(position) - 24.0, m_maxScrollY);
+                m_scrollY = qBound(0.0, yForCharacter(position) + offsetInLine, m_maxScrollY);
         }
     }
     m_scrollY = qBound(0.0, m_scrollY, m_maxScrollY);
@@ -201,7 +207,10 @@ qreal ReaderItem::yForCharacter(int position) const
         return 0.0;
     QTextCursor cursor(m_textDocument.get());
     cursor.setPosition(qBound(0, position, m_textDocument->characterCount() - 1));
-    return m_textDocument->documentLayout()->blockBoundingRect(cursor.block()).top();
+    const QTextBlock block = cursor.block();
+    const qreal blockTop = m_textDocument->documentLayout()->blockBoundingRect(block).top();
+    const QTextLine line = block.layout()->lineForTextPosition(cursor.positionInBlock());
+    return blockTop + (line.isValid() ? line.y() : 0.0);
 }
 
 int ReaderItem::characterAt(const QPointF &point) const
@@ -335,7 +344,8 @@ void ReaderItem::goToLocator(const QString &locator)
     }
 
     if (target >= 0) {
-        m_scrollY = qBound(0.0, yForCharacter(target) - 24.0, m_maxScrollY);
+        const qreal context = sections.size() == 2 || payload.contains(QLatin1Char('-')) ? 24.0 : 0.0;
+        m_scrollY = qBound(0.0, yForCharacter(target) - context, m_maxScrollY);
         emit scrollChanged();
         emitPosition();
         update();
@@ -404,7 +414,7 @@ void ReaderItem::geometryChange(const QRectF &newGeometry, const QRectF &oldGeom
 
 void ReaderItem::mousePressEvent(QMouseEvent *event)
 {
-    if (event->button() != Qt::LeftButton)
+    if (!m_ready || event->button() != Qt::LeftButton)
         return;
 
     if (m_format == QStringLiteral("pdf")) {

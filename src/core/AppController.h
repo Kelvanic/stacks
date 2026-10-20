@@ -11,6 +11,8 @@
 #include <QVariantList>
 #include <QVariantMap>
 
+class QThread;
+
 namespace stacks {
 
 class AppController : public QObject
@@ -38,7 +40,7 @@ public:
     explicit AppController(QObject *parent = nullptr);
     ~AppController() override;
 
-    bool initialize(const QString &sampleDirectory);
+    bool initialize(const QString &sampleDirectory, const QString &dataDirectory = QString());
 
     QVariantList books() const { return m_books; }
     QVariantMap currentBook() const { return m_currentBook; }
@@ -146,6 +148,7 @@ private:
 
     VoiceRecorder m_voiceRecorder;
     KindleSender *m_kindleSender = nullptr;
+    QThread *m_conversionWorker = nullptr;
     QVariantList m_kindleResults;
     QVariantMap m_kindleSettings;
     bool m_kindleBusy = false;
@@ -154,6 +157,7 @@ private:
     double m_recordingLevel = 0.0;
 
     QTimer m_positionTimer;
+    int m_pendingPositionBookId = 0;
     QString m_pendingPositionLocator;
     double m_pendingProgress = 0.0;
 };

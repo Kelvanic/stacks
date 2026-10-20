@@ -1,6 +1,7 @@
 #include "AppController.h"
 
 #include <QDateTime>
+#include <QCoreApplication>
 #include <QDesktopServices>
 #include <QDir>
 #include <QFile>
@@ -9,9 +10,10 @@
 #include <QJsonObject>
 #include <QRegularExpression>
 #include <QThread>
-#include <QRegularExpression>
 #include <QStandardPaths>
 #include <QUrl>
+
+#include <memory>
 
 namespace stacks {
 
@@ -21,6 +23,11 @@ AppController::AppController(QObject *parent)
     m_positionTimer.setSingleShot(true);
     m_positionTimer.setInterval(450);
     connect(&m_positionTimer, &QTimer::timeout, this, &AppController::flushPosition);
+    connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this, [this]() {
+        flushPosition();
+        if (m_recording)
+            stopVoiceNote(QString());
+    });
     bindVoiceRecorder();
 
     m_kindleSender = new KindleSender(this);
@@ -38,6 +45,16 @@ AppController::AppController(QObject *parent)
 
 AppController::~AppController()
 {
+    m_positionTimer.stop();
+    flushPosition();
+    if (m_recording)
+        stopVoiceNote(QString());
+    // The worker owns only its inputs and result, never this controller.
+    if (m_conversionWorker) {
+        m_conversionWorker->wait();
+        delete m_conversionWorker;
+        m_conversionWorker = nullptr;
+    }
     delete m_library;
     m_library = nullptr;
 }
@@ -58,9 +75,10 @@ void AppController::bindVoiceRecorder()
     });
 }
 
-bool AppController::initialize(const QString &sampleDirectory)
+bool AppController::initialize(const QString &sampleDirectory, const QString &dataDirectory)
 {
-    const QString base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    const QString base = dataDirectory.isEmpty()
+        ? QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) : dataDirectory;
     m_dataDirectory = base;
     QDir().mkpath(base);
     QDir().mkpath(QDir(base).filePath(QStringLiteral("voice")));
@@ -147,12 +165,16 @@ void AppController::openBook(int bookId)
 {
     if (!m_library)
         return;
+    m_positionTimer.stop();
+    flushPosition();
     const Book book = m_library->book(bookId);
     if (book.id <= 0) {
         setStatus(QStringLiteral("Book not found."));
         return;
     }
 
+    if (m_recording)
+        stopVoiceNote(QString());
     m_currentBook = book.toVariant();
     m_readerOpen = true;
 
@@ -173,6 +195,8 @@ void AppController::openBook(int bookId)
 
 void AppController::closeBook()
 {
+    if (m_recording)
+        stopVoiceNote(QString());
     m_positionTimer.stop();
     flushPosition();
     m_readerOpen = false;
@@ -195,6 +219,7 @@ void AppController::savePosition(const QString &locator, double progress)
     if (!m_library || m_currentBook.isEmpty())
         return;
     m_pendingPositionLocator = locator;
+    m_pendingPositionBookId = m_currentBook.value(QStringLiteral("id")).toInt();
     m_pendingProgress = progress;
     m_currentBook.insert(QStringLiteral("locator"), locator);
     m_currentBook.insert(QStringLiteral("progress"), progress);
@@ -204,12 +229,15 @@ void AppController::savePosition(const QString &locator, double progress)
 
 void AppController::flushPosition()
 {
-    if (!m_library || m_currentBook.isEmpty())
+    if (!m_library)
         return;
-    const int bookId = m_currentBook.value(QStringLiteral("id")).toInt();
+    const int bookId = m_pendingPositionBookId;
     if (bookId <= 0 || m_pendingPositionLocator.isEmpty())
         return;
-    m_library->savePosition(bookId, m_pendingPositionLocator, m_pendingProgress);
+    if (m_library->savePosition(bookId, m_pendingPositionLocator, m_pendingProgress)) {
+        m_pendingPositionBookId = 0;
+        m_pendingPositionLocator.clear();
+    }
 }
 
 int AppController::pageForLocator(const QString &locator) const
@@ -293,6 +321,8 @@ void AppController::openAnnotation(int annotationId)
 
 bool AppController::startVoiceNote()
 {
+    if (!m_library || m_currentBook.isEmpty())
+        return false;
     if (m_recording)
         return true;
     QString error;
@@ -442,18 +472,22 @@ void AppController::startConversion(const QString &path, const QString &format,
     }
 
     m_kindleBusy = true;
+    m_kindleResults.clear();
     m_kindleStatus = QStringLiteral("Converting %1…").arg(QFileInfo(path).fileName());
     emit kindleChanged();
 
     const QString outputDirectory = kindleDirectory();
-    QThread *worker = QThread::create([this, path, format, title, author, outputDirectory]() {
-        const KindleConverter::Result result =
-            KindleConverter::convert(path, format, title, author, outputDirectory);
-        QMetaObject::invokeMethod(this, [this, result]() { onConversionFinished(result); },
-                                  Qt::QueuedConnection);
+    if (m_conversionWorker) {
+        m_conversionWorker->wait();
+        delete m_conversionWorker;
+    }
+    const auto result = std::make_shared<KindleConverter::Result>();
+    m_conversionWorker = QThread::create([path, format, title, author, outputDirectory, result]() {
+        *result = KindleConverter::convert(path, format, title, author, outputDirectory);
     });
-    connect(worker, &QThread::finished, worker, &QObject::deleteLater);
-    worker->start();
+    connect(m_conversionWorker, &QThread::finished, this,
+            [this, result]() { onConversionFinished(*result); });
+    m_conversionWorker->start();
 }
 
 void AppController::onConversionFinished(const KindleConverter::Result &result)
@@ -468,6 +502,7 @@ void AppController::onConversionFinished(const KindleConverter::Result &result)
     entry.insert("title", result.title);
     entry.insert("author", result.author);
     entry.insert("format", result.sourceFormat);
+    entry.insert("sourcePath", result.sourcePath);
     entry.insert("pages", result.pages);
     entry.insert("words", result.words);
     entry.insert("bytes", result.bytes);
@@ -493,6 +528,10 @@ void AppController::convertBookForKindle(int bookId)
 
 void AppController::convertFileForKindle(const QString &url)
 {
+    if (m_kindleBusy) {
+        emit toast(QStringLiteral("Wait for the current transfer to finish."));
+        return;
+    }
     const QString path = url.startsWith(QLatin1String("file:"))
                              ? QUrl(url).toLocalFile()
                              : url;
@@ -514,16 +553,17 @@ void AppController::convertFileForKindle(const QString &url)
     } else {
         // Amazon also accepts DOC, DOCX, RTF and images as they are.
         emit toast(QStringLiteral("%1 is sent to Amazon as it is — no conversion needed.").arg(suffix.toUpper()));
-        m_kindleResults.append(QVariantMap{
+        m_kindleResults = {QVariantMap{
             {QStringLiteral("ok"), true},
             {QStringLiteral("asIs"), true},
             {QStringLiteral("path"), path},
+            {QStringLiteral("sourcePath"), path},
             {QStringLiteral("fileName"), QFileInfo(path).fileName()},
             {QStringLiteral("title"), QFileInfo(path).completeBaseName()},
             {QStringLiteral("author"), QString()},
             {QStringLiteral("format"), suffix},
             {QStringLiteral("bytes"), QFileInfo(path).size()},
-        });
+        }};
         m_kindleStatus = QStringLiteral("%1 is ready to send.").arg(QFileInfo(path).fileName());
         emit kindleChanged();
         return;

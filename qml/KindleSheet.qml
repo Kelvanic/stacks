@@ -18,6 +18,8 @@ Item {
     property bool settingsOpen: false
 
     function open() {
+        if (!controller.kindleBusy)
+            controller.clearKindleResults()
         detailFlick.contentY = 0
         sheet.visible = true
         sheet.selectedBook = null
@@ -32,6 +34,9 @@ Item {
     }
 
     function pickBook(book) {
+        if (controller.kindleBusy)
+            return
+        controller.clearKindleResults()
         detailFlick.contentY = 0
         sheet.selectedBook = book
         sheet.sourcePath = book.path || ""
@@ -51,9 +56,20 @@ Item {
         })
     }
 
+    function pickFile(url) {
+        if (controller.kindleBusy)
+            return
+        sheet.selectedBook = null
+        sheet.sourcePath = ""
+        sheet.sourceTitle = ""
+        controller.clearKindleResults()
+        controller.convertFileForKindle(url)
+    }
+
     function result() {
         const results = controller.kindleResults
-        return results.length > 0 ? results[results.length - 1] : null
+        const latest = results.length > 0 ? results[results.length - 1] : null
+        return latest && (!sheet.selectedBook || sheet.sourcePath === latest.sourcePath) ? latest : null
     }
 
     Rectangle {

@@ -188,6 +188,40 @@ bool Database::migrate(QString *error)
             "  INSERT INTO passages_fts(passages_fts, rowid, text) VALUES ('delete', old.id, old.text); "
             "  INSERT INTO passages_fts(rowid, text) VALUES (new.id, new.text); "
             "END"));
+
+        QSqlQuery exists(m_db);
+        exists.exec(QStringLiteral("SELECT 1 FROM sqlite_master WHERE name = 'annotations_fts'"));
+        const bool hadAnnotationIndex = exists.next();
+        if (!run(QStringLiteral(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS annotations_fts USING fts5("
+                "quote, note, transcript, tokenize='porter unicode61')")))
+            return false;
+        if (!run(QStringLiteral(
+                "CREATE TRIGGER IF NOT EXISTS annotations_ai AFTER INSERT ON annotations BEGIN "
+                "INSERT INTO annotations_fts(rowid, quote, note, transcript) "
+                "VALUES (new.id, new.quote, new.note, COALESCE((SELECT transcript FROM voice_notes WHERE id = new.voice_id), '')); END"))
+            || !run(QStringLiteral(
+                "CREATE TRIGGER IF NOT EXISTS annotations_au AFTER UPDATE ON annotations BEGIN "
+                "DELETE FROM annotations_fts WHERE rowid = old.id; "
+                "INSERT INTO annotations_fts(rowid, quote, note, transcript) "
+                "VALUES (new.id, new.quote, new.note, COALESCE((SELECT transcript FROM voice_notes WHERE id = new.voice_id), '')); END"))
+            || !run(QStringLiteral(
+                "CREATE TRIGGER IF NOT EXISTS annotations_ad AFTER DELETE ON annotations BEGIN "
+                "DELETE FROM annotations_fts WHERE rowid = old.id; END"))
+            || !run(QStringLiteral(
+                "CREATE TRIGGER IF NOT EXISTS voice_notes_search_au AFTER UPDATE OF transcript ON voice_notes BEGIN "
+                "UPDATE annotations_fts SET transcript = new.transcript "
+                "WHERE rowid IN (SELECT id FROM annotations WHERE voice_id = new.id); END"))
+            || !run(QStringLiteral(
+                "CREATE TRIGGER IF NOT EXISTS voice_notes_search_ad AFTER DELETE ON voice_notes BEGIN "
+                "UPDATE annotations_fts SET transcript = '' "
+                "WHERE rowid IN (SELECT id FROM annotations WHERE voice_id = old.id); END")))
+            return false;
+        if (!hadAnnotationIndex && !run(QStringLiteral(
+                "INSERT INTO annotations_fts(rowid, quote, note, transcript) "
+                "SELECT a.id, a.quote, a.note, COALESCE(v.transcript, '') "
+                "FROM annotations a LEFT JOIN voice_notes v ON v.id = a.voice_id")))
+            return false;
     }
 
     run(QStringLiteral(
@@ -202,7 +236,7 @@ bool Database::migrate(QString *error)
         "CREATE INDEX IF NOT EXISTS idx_diagram_edges_from ON diagram_edges(from_node)"));
 
     if (!run(QStringLiteral(
-            "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '1')")))
+            "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '2')")))
         return false;
 
     return true;

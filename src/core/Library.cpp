@@ -375,12 +375,13 @@ bool Library::updateAnnotation(int annotationId, const QString &note, const QStr
 {
     QSqlQuery query(m_database->db());
     if (!query.prepare(QStringLiteral(
-            "UPDATE annotations SET note = :note, quote = :quote WHERE id = :id"))) {
+            "UPDATE annotations SET note = :note, quote = COALESCE(:quote, quote) WHERE id = :id"))) {
         qWarning() << "updateAnnotation prepare failed:" << query.lastError().text();
         return false;
     }
     query.bindValue(QStringLiteral(":note"), note.isNull() ? QStringLiteral("") : note);
-    query.bindValue(QStringLiteral(":quote"), quote.isNull() ? QStringLiteral("") : quote);
+    // A null quote means note-only editing; an explicitly empty quote clears it.
+    query.bindValue(QStringLiteral(":quote"), quote);
     query.bindValue(QStringLiteral(":id"), annotationId);
     if (!query.exec()) {
         qWarning() << "updateAnnotation exec failed:" << query.lastError().text()
@@ -418,7 +419,9 @@ int Library::addVoiceNote(int bookId, int annotationId, const QString &path,
     const int voiceId = voice.lastInsertId().toInt();
 
     if (annotationId <= 0) {
-        annotationId = addAnnotation(bookId, QStringLiteral("voice"), QString(), QString(),
+        const Book owner = book(bookId);
+        const QString locator = owner.locator.isEmpty() ? owner.format + QStringLiteral(":0") : owner.locator;
+        annotationId = addAnnotation(bookId, QStringLiteral("voice"), locator, QString(),
                                      transcript, 0, QStringLiteral("#C46A3B"));
     }
 
@@ -455,11 +458,18 @@ QVector<SearchResult> Library::search(const QString &queryText, int limit) const
         query.prepare(QStringLiteral(
             "SELECT p.id, p.book_id, b.title, b.author, b.format, p.locator, p.page, "
             "       snippet(passages_fts, 0, '<mark>', '</mark>', '…', 14) AS snip, "
-            "       bm25(passages_fts) AS rank "
+            "       bm25(passages_fts) AS rank, 0 AS annotation_id "
             "FROM passages_fts "
             "JOIN passages p ON p.id = passages_fts.rowid "
             "JOIN books b ON b.id = p.book_id "
             "WHERE passages_fts MATCH :match "
+            "UNION ALL "
+            "SELECT 0, a.book_id, b.title, b.author, b.format, a.locator, a.page, "
+            "       snippet(annotations_fts, -1, '<mark>', '</mark>', '…', 14), "
+            "       bm25(annotations_fts), a.id "
+            "FROM annotations_fts JOIN annotations a ON a.id = annotations_fts.rowid "
+            "JOIN books b ON b.id = a.book_id "
+            "WHERE annotations_fts MATCH :match "
             "ORDER BY rank LIMIT :limit"));
         query.bindValue(QStringLiteral(":match"), match);
         query.bindValue(QStringLiteral(":limit"), limit);
@@ -477,6 +487,7 @@ QVector<SearchResult> Library::search(const QString &queryText, int limit) const
             result.page = query.value(6).toInt();
             result.snippet = highlightSnippet(query.value(7).toString());
             result.rank = query.value(8).toDouble();
+            result.annotationId = query.value(9).toInt();
             results.append(result);
         }
         return results;
@@ -485,9 +496,15 @@ QVector<SearchResult> Library::search(const QString &queryText, int limit) const
     // Fallback for SQLite builds without FTS5.
     const QString first = tokens.first();
     query.prepare(QStringLiteral(
-        "SELECT p.id, p.book_id, b.title, b.author, b.format, p.locator, p.page, p.text "
+        "SELECT * FROM ("
+        "SELECT p.id, p.book_id, b.title, b.author, b.format, p.locator, p.page, p.text, 0 AS annotation_id "
         "FROM passages p JOIN books b ON b.id = p.book_id "
-        "WHERE p.text LIKE :term ORDER BY p.id LIMIT :limit"));
+        "UNION ALL "
+        "SELECT 0, a.book_id, b.title, b.author, b.format, a.locator, a.page, "
+        "a.quote || ' ' || a.note || ' ' || COALESCE(v.transcript, ''), a.id "
+        "FROM annotations a JOIN books b ON b.id = a.book_id "
+        "LEFT JOIN voice_notes v ON v.id = a.voice_id) "
+        "WHERE text LIKE :term ORDER BY id LIMIT :limit"));
     query.bindValue(QStringLiteral(":term"), QStringLiteral("%") + first + QStringLiteral("%"));
     query.bindValue(QStringLiteral(":limit"), limit);
     if (!query.exec())
@@ -507,6 +524,7 @@ QVector<SearchResult> Library::search(const QString &queryText, int limit) const
         const int start = std::max(0, index - 60);
         result.snippet = escapeHtml(text.mid(start, 180));
         result.rank = 0;
+        result.annotationId = query.value(8).toInt();
         results.append(result);
     }
     return results;

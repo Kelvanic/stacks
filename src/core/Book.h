@@ -75,6 +75,7 @@ struct Annotation {
 
 struct SearchResult {
     int passageId = 0;
+    int annotationId = 0;
     int bookId = 0;
     QString bookTitle;
     QString bookAuthor;
@@ -89,6 +90,7 @@ struct SearchResult {
     {
         QVariantMap map;
         map.insert("passageId", passageId);
+        map.insert("annotationId", annotationId);
         map.insert("bookId", bookId);
         map.insert("bookTitle", bookTitle);
         map.insert("bookAuthor", bookAuthor);

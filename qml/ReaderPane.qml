@@ -28,12 +28,16 @@ Rectangle {
     Connections {
         target: controller
         function onReaderRequested(bookId, locator) {
+            pane.noteVisible = false
+            pane.voiceVisible = false
             if (!pane.book.path)
                 return
             reader.load(pane.book.path, pane.book.format, locator)
             reader.annotations = controller.annotations
         }
         function onReaderClosed() {
+            pane.noteVisible = false
+            pane.voiceVisible = false
             reader.closeDocument()
         }
         function onAnnotationsChanged() {

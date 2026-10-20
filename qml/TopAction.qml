@@ -10,7 +10,6 @@ Item {
     property string label: ""
     property string shortcut: ""
     property bool active: false
-    property bool enabled: true
     signal clicked()
 
     implicitWidth: 34

@@ -37,6 +37,7 @@ public:
 
 private:
     void *m_document = nullptr;
+    bool m_libraryInitialized = false;
     int m_pageCount = 0;
     QString m_lastError;
 };

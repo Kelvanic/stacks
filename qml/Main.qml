@@ -30,7 +30,7 @@ ApplicationWindow {
         title: "Choose a file to send to Kindle"
         fileMode: FileDialog.OpenFile
         nameFilters: ["Documents (*.pdf *.epub *.txt *.md *.htm *.html *.doc *.docx *.rtf *.png *.jpg *.jpeg *.gif *.bmp)"]
-        onAccepted: controller.convertFileForKindle(selectedFile)
+        onAccepted: kindle.pickFile(selectedFile)
     }
 
     Shortcut {

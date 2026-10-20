@@ -121,6 +121,7 @@ void TestCore::testAnnotations()
                                         [id](const Annotation &a) { return a.id == id; });
     QVERIFY(updatedIt != updated.cend());
     QCOMPARE(updatedIt->note, QStringLiteral("Revised note"));
+    QCOMPARE(updatedIt->quote, QStringLiteral("Attention is a practice, not a possession."));
 }
 
 void TestCore::testVoiceNotes()

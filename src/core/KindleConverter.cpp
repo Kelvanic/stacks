@@ -5,10 +5,12 @@
 #include <QBuffer>
 #include <QDateTime>
 #include <QDir>
+#include <QDomDocument>
 #include <QFile>
 #include <QFileInfo>
 #include <QImage>
 #include <QRegularExpression>
+#include <QSet>
 #include <QTextStream>
 #include <QUuid>
 #include <QXmlStreamReader>
@@ -33,20 +35,20 @@ public:
         m_archive = zip_open(path.toUtf8().constData(), ZIP_CREATE | ZIP_TRUNCATE, &error);
     }
 
-    ~ZipWriter() { close(); }
+    ~ZipWriter() { if (m_archive) zip_discard(m_archive); }
 
     bool isValid() const { return m_archive != nullptr; }
 
     bool add(const QString &name, const QByteArray &data, bool store = false)
     {
-        if (!m_archive)
+        if (!m_archive || !m_ok)
             return false;
 
         // libzip keeps a pointer to the buffer until the archive is closed,
         // so the bytes are copied onto the heap and handed over to libzip.
         void *buffer = std::malloc(static_cast<size_t>(data.size()) + 1);
         if (!buffer)
-            return false;
+            return m_ok = false;
         if (!data.isEmpty())
             std::memcpy(buffer, data.constData(), static_cast<size_t>(data.size()));
         static_cast<char *>(buffer)[data.size()] = '\0';
@@ -55,16 +57,17 @@ public:
                                                  static_cast<zip_uint64_t>(data.size()), 1);
         if (!source) {
             std::free(buffer);
-            return false;
+            return m_ok = false;
         }
         if (zip_file_add(m_archive, name.toUtf8().constData(), source,
                          ZIP_FL_OVERWRITE | ZIP_FL_ENC_GUESS) < 0) {
-            return false;
+            zip_source_free(source);
+            return m_ok = false;
         }
         if (store) {
             const zip_int64_t index = zip_name_locate(m_archive, name.toUtf8().constData(), 0);
-            if (index >= 0)
-                zip_set_file_compression(m_archive, zip_uint64_t(index), ZIP_CM_STORE, 0);
+            if (index < 0 || zip_set_file_compression(m_archive, zip_uint64_t(index), ZIP_CM_STORE, 0) != 0)
+                return m_ok = false;
         }
         return true;
     }
@@ -72,32 +75,41 @@ public:
     // Copies an entry from another archive without decompressing it.
     bool copyFrom(zip_t *source, const QString &name)
     {
-        if (!m_archive || !source)
+        if (!m_archive || !source || !m_ok)
             return false;
         const zip_int64_t index = zip_name_locate(source, name.toUtf8().constData(), 0);
         if (index < 0)
-            return false;
+            return m_ok = false;
+#if LIBZIP_VERSION_MAJOR > 1 || (LIBZIP_VERSION_MAJOR == 1 && LIBZIP_VERSION_MINOR >= 12)
+        zip_source_t *copied = zip_source_zip_file(m_archive, source, zip_uint64_t(index), 0, 0, -1, nullptr);
+#else
         zip_source_t *copied = zip_source_zip(m_archive, source, zip_uint64_t(index), 0, 0, -1);
+#endif
         if (!copied)
-            return false;
+            return m_ok = false;
         if (zip_file_add(m_archive, name.toUtf8().constData(), copied,
                          ZIP_FL_OVERWRITE | ZIP_FL_ENC_GUESS) < 0) {
             zip_source_free(copied);
-            return false;
+            return m_ok = false;
         }
         return true;
     }
 
-    void close()
+    bool close()
     {
         if (m_archive) {
-            zip_close(m_archive);
+            if (!m_ok || zip_close(m_archive) != 0) {
+                zip_discard(m_archive);
+                m_ok = false;
+            }
             m_archive = nullptr;
         }
+        return m_ok;
     }
 
 private:
     zip_t *m_archive = nullptr;
+    bool m_ok = true;
 };
 
 // ── Text helpers ───────────────────────────────────────────────────────────
@@ -394,66 +406,24 @@ bool readTextChapters(const QString &path, QVector<KindleChapter> &chapters, int
     return true;
 }
 
-struct ManifestItem {
-    QString id;
-    QString href;
-    QString mediaType;
-    QString properties;
-};
-
-struct SourcePackage {
-    QString opfPath;
-    QVector<ManifestItem> manifest;
-    QStringList spine;
-    QString title;
-    QString author;
-    QString language;
-    QString coverHref;
-};
-
-SourcePackage readPackage(zip_t *archive, const QString &opfPath)
+QByteArray readZipData(zip_t *archive, const QString &path)
 {
-    SourcePackage package;
-    package.opfPath = opfPath;
-
     zip_stat_t stat {};
-    QByteArray opf;
-    if (zip_stat(archive, opfPath.toUtf8().constData(), 0, &stat) == 0) {
-        zip_file_t *file = zip_fopen(archive, opfPath.toUtf8().constData(), 0);
-        if (file) {
-            opf.resize(static_cast<int>(stat.size));
-            const zip_int64_t read = zip_fread(file, opf.data(), opf.size());
-            zip_fclose(file);
-            opf.resize(static_cast<int>(read));
-        }
+    if (zip_stat(archive, path.toUtf8().constData(), 0, &stat) != 0 || stat.size > 64 * 1024 * 1024)
+        return {};
+    zip_file_t *file = zip_fopen(archive, path.toUtf8().constData(), 0);
+    if (!file)
+        return {};
+    QByteArray data(static_cast<qsizetype>(stat.size), '\0');
+    zip_uint64_t total = 0;
+    while (total < stat.size) {
+        const zip_int64_t count = zip_fread(file, data.data() + total, stat.size - total);
+        if (count <= 0)
+            break;
+        total += zip_uint64_t(count);
     }
-
-    QXmlStreamReader reader(opf);
-    while (!reader.atEnd()) {
-        reader.readNext();
-        if (!reader.isStartElement())
-            continue;
-        const QStringView name = reader.name();
-        if (name == QStringLiteral("item")) {
-            ManifestItem item;
-            item.id = reader.attributes().value(QStringLiteral("id")).toString();
-            item.href = reader.attributes().value(QStringLiteral("href")).toString();
-            item.mediaType = reader.attributes().value(QStringLiteral("media-type")).toString();
-            item.properties = reader.attributes().value(QStringLiteral("properties")).toString();
-            if (item.properties.contains(QLatin1String("cover-image")))
-                package.coverHref = item.href;
-            package.manifest.append(item);
-        } else if (name == QStringLiteral("itemref")) {
-            package.spine.append(reader.attributes().value(QStringLiteral("idref")).toString());
-        } else if (name == QStringLiteral("title")) {
-            package.title = reader.readElementText().trimmed();
-        } else if (name == QStringLiteral("creator")) {
-            package.author = reader.readElementText().trimmed();
-        } else if (name == QStringLiteral("language")) {
-            package.language = reader.readElementText().trimmed();
-        }
-    }
-    return package;
+    zip_fclose(file);
+    return total == stat.size ? data : QByteArray();
 }
 
 } // namespace
@@ -483,6 +453,7 @@ KindleConverter::Result KindleConverter::convert(const QString &sourcePath,
 {
     Result result;
     result.sourceFormat = sourceFormat;
+    result.sourcePath = sourcePath;
     result.title = title.trimmed().isEmpty() ? QFileInfo(sourcePath).completeBaseName() : title.trimmed();
     result.author = author.trimmed();
 
@@ -492,7 +463,11 @@ KindleConverter::Result KindleConverter::convert(const QString &sourcePath,
     }
     QDir().mkpath(outputDir);
 
-    const QString outPath = QDir(outputDir).filePath(suggestedFileName(result.title, result.author));
+    QString outPath = QDir(outputDir).filePath(suggestedFileName(result.title, result.author));
+    if (QFileInfo::exists(outPath)) {
+        outPath = QDir(outputDir).filePath(QFileInfo(outPath).completeBaseName()
+            + QLatin1Char('-') + QUuid::createUuid().toString(QUuid::WithoutBraces) + QStringLiteral(".epub"));
+    }
     QVector<KindleChapter> chapters;
 
     const QString format = sourceFormat.toLower();
@@ -510,19 +485,9 @@ KindleConverter::Result KindleConverter::convert(const QString &sourcePath,
             return result;
         }
 
-        QByteArray container;
-        zip_stat_t stat {};
-        if (zip_stat(source, "META-INF/container.xml", 0, &stat) == 0) {
-            zip_file_t *file = zip_fopen(source, "META-INF/container.xml", 0);
-            if (file) {
-                container.resize(static_cast<int>(stat.size));
-                const zip_int64_t read = zip_fread(file, container.data(), container.size());
-                zip_fclose(file);
-                container.resize(static_cast<int>(read));
-            }
-        }
+        const QByteArray container = readZipData(source, QStringLiteral("META-INF/container.xml"));
 
-        QString opfPath = QStringLiteral("OEBPS/content.opf");
+        QString opfPath;
         {
             QXmlStreamReader reader(container);
             while (!reader.atEnd()) {
@@ -531,19 +496,83 @@ KindleConverter::Result KindleConverter::convert(const QString &sourcePath,
                     opfPath = reader.attributes().value(QStringLiteral("full-path")).toString();
             }
         }
-        if (opfPath.isEmpty())
-            opfPath = QStringLiteral("OEBPS/content.opf");
-
-        const SourcePackage package = readPackage(source, opfPath);
-        if (package.manifest.isEmpty()) {
+        QDomDocument package;
+        const QString opfNs = QStringLiteral("http://www.idpf.org/2007/opf");
+        const QString dcNs = QStringLiteral("http://purl.org/dc/elements/1.1/");
+#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
+        const bool parsed = bool(package.setContent(readZipData(source, opfPath), QDomDocument::ParseOption::UseNamespaceProcessing));
+#else
+        const bool parsed = package.setContent(readZipData(source, opfPath), true);
+#endif
+        if (opfPath.isEmpty() || !parsed) {
             zip_close(source);
             result.error = QStringLiteral("This EPUB has no readable package document.");
             return result;
         }
-        if (result.title.isEmpty())
-            result.title = package.title;
-        if (result.author.isEmpty())
-            result.author = package.author;
+        QDomElement manifest = package.elementsByTagNameNS(opfNs, QStringLiteral("manifest")).item(0).toElement();
+        QDomElement spine = package.elementsByTagNameNS(opfNs, QStringLiteral("spine")).item(0).toElement();
+        QDomElement metadata = package.elementsByTagNameNS(opfNs, QStringLiteral("metadata")).item(0).toElement();
+        if (manifest.isNull() || spine.isNull() || metadata.isNull()) {
+            zip_close(source);
+            result.error = QStringLiteral("The EPUB package is missing its manifest, spine or metadata.");
+            return result;
+        }
+        QSet<QString> ids;
+        QHash<QString, QString> hrefs;
+        bool hasNav = false;
+        for (QDomElement item = manifest.firstChildElement(); !item.isNull(); item = item.nextSiblingElement()) {
+            const QString id = item.attribute(QStringLiteral("id"));
+            if (id.isEmpty() || ids.contains(id)) {
+                zip_close(source);
+                result.error = QStringLiteral("The EPUB contains missing or duplicate manifest identifiers.");
+                return result;
+            }
+            ids.insert(id);
+            hrefs.insert(id, item.attribute(QStringLiteral("href")));
+            hasNav |= item.attribute(QStringLiteral("properties")).split(QLatin1Char(' '), Qt::SkipEmptyParts).contains(QStringLiteral("nav"));
+        }
+        QString navItems;
+        for (QDomElement ref = spine.firstChildElement(); !ref.isNull(); ref = ref.nextSiblingElement()) {
+            const QString href = hrefs.value(ref.attribute(QStringLiteral("idref")));
+            if (href.isEmpty()) {
+                zip_close(source);
+                result.error = QStringLiteral("The EPUB spine references an unknown document.");
+                return result;
+            }
+            ++result.pages;
+            navItems += QStringLiteral("<li><a href=\"%1\">Section %2</a></li>").arg(xmlEscape(href)).arg(result.pages);
+        }
+        if (result.pages == 0) {
+            zip_close(source);
+            result.error = QStringLiteral("The EPUB has an empty spine.");
+            return result;
+        }
+        // Preserve original metadata, identifiers, navigation, asset paths and spine attributes.
+        package.documentElement().setAttribute(QStringLiteral("version"), QStringLiteral("3.0"));
+        const auto setMetadata = [&](const QString &name, const QString &value) {
+            QDomElement element = metadata.elementsByTagNameNS(dcNs, name).item(0).toElement();
+            if (element.isNull()) {
+                element = package.createElementNS(dcNs, QStringLiteral("dc:") + name);
+                metadata.appendChild(element);
+            }
+            while (!element.firstChild().isNull()) element.removeChild(element.firstChild());
+            element.appendChild(package.createTextNode(value));
+        };
+        setMetadata(QStringLiteral("title"), result.title);
+        if (!result.author.isEmpty())
+            setMetadata(QStringLiteral("creator"), result.author);
+        else
+            result.author = metadata.elementsByTagNameNS(dcNs, QStringLiteral("creator")).item(0).toElement().text();
+        for (QDomElement meta = metadata.firstChildElement(); !meta.isNull();) {
+            QDomElement next = meta.nextSiblingElement();
+            if (meta.attribute(QStringLiteral("property")) == QStringLiteral("dcterms:modified"))
+                metadata.removeChild(meta);
+            meta = next;
+        }
+        QDomElement modified = package.createElementNS(opfNs, QStringLiteral("meta"));
+        modified.setAttribute(QStringLiteral("property"), QStringLiteral("dcterms:modified"));
+        modified.appendChild(package.createTextNode(QDateTime::currentDateTimeUtc().toString(QStringLiteral("yyyy-MM-dd'T'HH:mm:ss'Z'"))));
+        metadata.appendChild(modified);
 
         ZipWriter writer(outPath);
         if (!writer.isValid()) {
@@ -562,61 +591,36 @@ KindleConverter::Result KindleConverter::convert(const QString &sourcePath,
             if (zip_stat_index(source, i, 0, &entry) != 0)
                 continue;
             const QString name = QString::fromUtf8(entry.name);
-            if (name == QStringLiteral("mimetype") || name == opfPath)
+            if (name == QStringLiteral("mimetype") || name == opfPath || name == QStringLiteral("META-INF/container.xml"))
                 continue;
             writer.copyFrom(source, name);
         }
 
-        QStringList manifestLines;
-        QStringList spineLines;
-        bool hasCover = false;
-        for (const ManifestItem &item : package.manifest) {
-            QString properties = item.properties;
-            if (item.properties.contains(QLatin1String("cover-image"))
-                || (!package.coverHref.isEmpty() && item.href == package.coverHref)) {
-                hasCover = true;
-                if (!properties.contains(QLatin1String("cover-image")))
-                    properties += QLatin1String(" cover-image");
-            }
-            manifestLines.append(QStringLiteral("<item id=\"%1\" href=\"%2\" media-type=\"%3\"%4/>")
-                                     .arg(item.id, item.href, item.mediaType,
-                                          properties.isEmpty() ? QString()
-                                                               : QStringLiteral(" properties=\"%1\"").arg(properties)));
+        if (!hasNav) {
+            QString navId = QStringLiteral("stacks-nav");
+            while (ids.contains(navId)) navId += QLatin1Char('-');
+            QString navName = QStringLiteral("stacks-nav.xhtml");
+            const QDir opfDir(QFileInfo(opfPath).path());
+            while (zip_name_locate(source, QDir::cleanPath(opfDir.filePath(navName)).toUtf8().constData(), 0) >= 0)
+                navName.prepend(QLatin1Char('_'));
+            QDomElement nav = package.createElementNS(opfNs, QStringLiteral("item"));
+            nav.setAttribute(QStringLiteral("id"), navId);
+            nav.setAttribute(QStringLiteral("href"), navName);
+            nav.setAttribute(QStringLiteral("media-type"), QStringLiteral("application/xhtml+xml"));
+            nav.setAttribute(QStringLiteral("properties"), QStringLiteral("nav"));
+            manifest.appendChild(nav);
+            writer.add(QDir::cleanPath(opfDir.filePath(navName)), QStringLiteral(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?><html xmlns=\"http://www.w3.org/1999/xhtml\" "
+                "xmlns:epub=\"http://www.idpf.org/2007/ops\"><head><title>Contents</title></head>"
+                "<body><nav epub:type=\"toc\"><h1>Contents</h1><ol>%1</ol></nav></body></html>").arg(navItems).toUtf8());
         }
-        for (const QString &idref : package.spine)
-            spineLines.append(QStringLiteral("<itemref idref=\"%1\"/>").arg(idref));
-
-        manifestLines.append(QStringLiteral("<item id=\"nav\" href=\"nav.xhtml\" media-type=\"application/xhtml+xml\" properties=\"nav\"/>"));
-        manifestLines.append(QStringLiteral("<item id=\"ncx\" href=\"toc.ncx\" media-type=\"application/x-dtbncx+xml\"/>"));
-        writer.add(QStringLiteral("OEBPS/nav.xhtml"),
-                   QStringLiteral("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-                                  "<!DOCTYPE html>\n"
-                                  "<html xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:epub=\"http://www.idpf.org/2007/ops\">\n"
-                                  "  <head><title>%1</title></head>\n"
-                                  "  <body><nav epub:type=\"toc\"><h1>Contents</h1><ol></ol></nav></body>\n"
-                                  "</html>\n")
-                       .arg(xmlEscape(result.title))
-                       .toUtf8());
-        writer.add(QStringLiteral("OEBPS/toc.ncx"),
-                   QStringLiteral("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-                                  "<ncx xmlns=\"http://www.daisy.org/z3986/2005/ncx/\" version=\"2005-1\">\n"
-                                  "  <head><meta name=\"dtb:uid\" content=\"urn:uuid:%1\"/></head>\n"
-                                  "  <docTitle><text>%2</text></docTitle>\n"
-                                  "  <navMap></navMap>\n"
-                                  "</ncx>\n")
-                       .arg(QUuid::createUuid().toString(QUuid::WithoutBraces), xmlEscape(result.title))
-                       .toUtf8());
-
-        writer.add(opfPath,
-                   opfDocument(result.title, result.author,
-                               QStringLiteral("urn:uuid:") + QUuid::createUuid().toString(QUuid::WithoutBraces),
-                               package.language.isEmpty() ? QStringLiteral("en") : package.language,
-                               manifestLines, spineLines, hasCover)
-                       .toUtf8());
-        writer.close();
+        writer.add(opfPath, package.toByteArray());
+        const bool written = writer.close();
         zip_close(source);
-
-        result.pages = package.spine.size();
+        if (!written) {
+            result.error = QStringLiteral("Could not finish writing the converted EPUB.");
+            return result;
+        }
         result.ok = true;
         result.path = outPath;
         result.bytes = QFileInfo(outPath).size();
@@ -690,7 +694,10 @@ KindleConverter::Result KindleConverter::convert(const QString &sourcePath,
                            QStringLiteral("urn:uuid:") + QUuid::createUuid().toString(QUuid::WithoutBraces),
                            QStringLiteral("en"), manifestLines, spineLines, hasCover)
                    .toUtf8());
-    writer.close();
+    if (!writer.close()) {
+        result.error = QStringLiteral("Could not finish writing the converted EPUB.");
+        return result;
+    }
 
     result.ok = true;
     result.path = outPath;

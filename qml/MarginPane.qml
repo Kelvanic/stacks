@@ -373,6 +373,8 @@ Rectangle {
                 anchors.right: parent.right
                 anchors.top: parent.top
                 anchors.topMargin: 2
+                z: 1
+                objectName: "annotationDelete-" + entry.annotation.id
                 width: 22
                 height: 22
                 radius: 11

@@ -91,7 +91,29 @@ curl -fsSL https://github.com/bblanchon/pdfium-binaries/releases/latest/download
   | tar -xz -C third_party
 ```
 
-macOS uses the same layout with `pdfium-mac-universal.tgz`; Windows uses `pdfium-win-x64.tgz`. Point CMake at the corresponding PDFium library if it is not `third_party/lib/libpdfium.so`.
+The checked-in binary is **Linux x64 only**. PDFium must match the OS and CPU
+you are building for. CMake selects `.so`, `.dylib`, or `.dll`/`.lib` as appropriate;
+use `-DPDFIUM_ROOT=/path/to/pdfium` for a separate distribution containing
+`include/` and `lib/` (and `bin/` on Windows).
+
+macOS (Apple Silicon):
+
+```bash
+brew install qtbase qtdeclarative qtmultimedia libzip ninja
+mkdir -p third_party/pdfium-local
+curl -fL https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8111/pdfium-mac-arm64.tgz \
+  | tar -xz -C third_party/pdfium-local
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DCMAKE_PREFIX_PATH="$(brew --prefix)" -DPDFIUM_ROOT="$PWD/third_party/pdfium-local"
+cmake --build build --parallel
+```
+
+For Intel Macs, use `pdfium-mac-x64.tgz` from the same release. CMake adjusts
+the install name and ad-hoc signature of a **build-local copy** of the dylib;
+the downloaded library is not modified. Windows uses `pdfium-win-x64.tgz`,
+a Qt 6 SDK with Quick/Multimedia, and libzip/zlib (for example through vcpkg).
+Pass the Qt prefix, vcpkg toolchain, and `PDFIUM_ROOT` to CMake; the PDFium DLL
+is copied beside each executable. Qt's own runtime deployment remains required.
 
 Fonts are already checked in under `assets/fonts/` (SIL Open Font License).
 
@@ -111,6 +133,7 @@ cmake --build build -j
 ./build/stacks --import ~/book.epub
 ./build/stacks --open 3        # open a library id directly
 ./build/stacks --query margin  # headless full-text search
+./build/stacks --data-dir ./scratch-library  # isolated library for testing
 ```
 
 On a headless machine:
@@ -140,7 +163,16 @@ The test suite covers:
 - EPUB HTML/text extraction
 - `ReaderItem` load, page navigation, and locator resolution
 - the Kindle converter: PDF → EPUB and EPUB → EPUB, checked by reading the
-  produced file back with the app's own EPUB reader
+   produced file back with the app's own EPUB reader
+- regression coverage for position flushes, EPUB restoration, preserved/generated
+  navigation, concurrent PDFium access, conversion shutdown, annotation search
+  migrations/edits, and the margin-delete/Kindle-selection UI paths
+- a localhost SMTP server exercising verified STARTTLS and implicit TLS,
+  certificate rejection, missing STARTTLS, timeouts, attachment rejection and retry
+
+SMTP tests use an intentionally public localhost-only key/certificate under
+`tests/fixtures/`. These are test fixtures, never application credentials.
+Application-only builds can omit Qt Test with `-DBUILD_TESTING=OFF`.
 
 ## Full end-to-end run
 
@@ -148,7 +180,7 @@ The test suite covers:
 tools/e2e.sh
 ```
 
-This configures, builds, runs the Qt tests, runs the QML smoke test, renders welcome/EPUB/PDF screenshots, and verifies a headless search.
+This configures, builds, runs the Qt tests, runs the QML smoke test, renders welcome/EPUB/PDF screenshots, and verifies a headless search. It uses a fresh output/data directory and never deletes the shared `~/.qttest` directory. Extra CMake arguments can be passed to the script, for example `tools/e2e.sh -DPDFIUM_ROOT=/path/to/pdfium`.
 
 ---
 
@@ -156,10 +188,11 @@ This configures, builds, runs the Qt tests, runs the QML smoke test, renders wel
 
 - **Core is pure C++ and has no UI dependency.** `Library` owns all SQL and indexing; `Database` owns the schema and FTS5 setup. This is the layer that later syncs, migrates, or gets reused by a CLI.
 - **`ReaderItem` owns rendering and selection.** It is a `QQuickPaintedItem` so QML animates the shell (sidebar, palette, recorder, canvas) while C++ paints the reader itself. This is the split that keeps page turns and text layout native.
-- **PDFium is loaded once and reference-counted.** `PdfDocument::globalInit()` / `globalShutdown()` wrap the library lifecycle.
+- **PDFium is reference-counted and process-wide serialized.** Every API call is protected by the same mutex, including worker-thread conversion, rendering and library teardown.
 - **EPUB chapters are read through libzip, parsed to sanitized XHTML, and rendered as one continuous `QTextDocument`.** Highlights are stored as `epub:<start>-<end>` character ranges; search results use `epub:<chapter>:<paragraph>` and are resolved by finding the passage text.
 - **Search is FTS5 with a `LIKE` fallback** for SQLite builds that lack FTS5. Query terms are quoted and prefix-matched, so partial words work.
 - **Positions are debounced** in `AppController` (450 ms) so scrolling writes at most a few rows per second.
+- **Navigation and shutdown flush pending positions.** Voice recordings are stopped and saved to the original book before leaving it; conversion workers are joined at shutdown.
 - **Voice capture is intentionally simple.** `VoiceRecorder` writes 16 kHz mono WAV via `QAudioSource`; transcription is a 1.1 integration point for whisper.cpp or the platform speech API.
 - **Animation is transform/opacity only.** The rails, palette, and recorder use short eased transitions; the reader itself never animates layout.
 - **The page is owned by QML, the content by C++.** `ReaderItem` paints text and PDF pages only; the paper, its tooth, the bound edge, the running head and the folio are QML layers around it, so the shell can be restyled without touching the renderer.
@@ -175,8 +208,9 @@ command palette.
    EPUB: a cover rendered from page one, one XHTML chapter per section, a
    navigation document, an NCX for older readers, and fixed Dublin Core
    metadata. An EPUB input is normalised instead of rebuilt: its own text and
-   images are kept, the package document is rewritten, and a nav document is
-   added. The result is written to `<data dir>/kindle/`.
+   images, navigation, identifiers and package-relative paths are kept; a linked
+   nav document is added only when one is missing. The result is written to
+   `<data dir>/kindle/` without overwriting earlier conversions.
 3. **Send** — the EPUB is attached to an email addressed to your
    `@kindle.com` address and handed to Amazon's *Send to Kindle for Email*
    service, which accepts PDF, DOC, DOCX, TXT, RTF, HTM, HTML, images and
@@ -187,6 +221,10 @@ The sending account (from address, SMTP host, user, app password) is stored in
 `<data dir>/kindle.json` with owner-only permissions and never leaves the
 machine except as the mail it sends. An app password is the right credential
 here — for Gmail, enable 2FA and create one under *App passwords*.
+
+SMTP requires verified TLS: STARTTLS on the configured port, or implicit TLS
+on port 465. The app refuses certificate errors and servers without STARTTLS,
+and sends credentials only after encryption is established.
 
 ## Design
 

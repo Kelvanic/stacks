@@ -103,12 +103,13 @@ QString VoiceRecorder::stop()
     m_recording = false;
     emit recordingChanged(false);
 
-    if (m_source)
-        m_source->stop();
+    // stop() invalidates the QIODevice returned by QAudioSource::start().
     if (m_io) {
         m_pcm.append(m_io->readAll());
         m_io = nullptr;
     }
+    if (m_source)
+        m_source->stop();
     if (m_source) {
         m_source->deleteLater();
         m_source = nullptr;

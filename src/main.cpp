@@ -10,6 +10,7 @@
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQuickWindow>
+#include <QQuickStyle>
 #include <QStandardPaths>
 #include <QTimer>
 #include <QUrl>
@@ -42,6 +43,7 @@ int main(int argc, char *argv[])
         QStandardPaths::setTestModeEnabled(true);
 
     QGuiApplication app(argc, argv);
+    QQuickStyle::setStyle(QStringLiteral("Basic"));
     QCoreApplication::setOrganizationName(QStringLiteral("Stacks"));
     QCoreApplication::setOrganizationDomain(QStringLiteral("stacks.local"));
     QCoreApplication::setApplicationName(QStringLiteral("Stacks"));
@@ -60,7 +62,9 @@ int main(int argc, char *argv[])
     parser.addVersionOption();
     QCommandLineOption importOption(QStringList { QStringLiteral("import") },
                                     QStringLiteral("Import a PDF or EPUB before launching."),
-                                    QStringLiteral("path"));
+                                     QStringLiteral("path"));
+    QCommandLineOption dataOption(QStringList { QStringLiteral("data-dir") },
+                                  QStringLiteral("Use an explicit local data directory."), QStringLiteral("path"));
     QCommandLineOption screenshotOption(QStringList { QStringLiteral("screenshot") },
                                         QStringLiteral("Render the UI once and save a PNG."),
                                         QStringLiteral("path"));
@@ -77,6 +81,7 @@ int main(int argc, char *argv[])
     QCommandLineOption diagramOption(QStringList { QStringLiteral("diagram") },
                                      QStringLiteral("Open the diagram canvas after launch."));
     parser.addOption(importOption);
+    parser.addOption(dataOption);
     parser.addOption(screenshotOption);
     parser.addOption(smokeOption);
     parser.addOption(queryOption);
@@ -86,7 +91,7 @@ int main(int argc, char *argv[])
     parser.process(app);
 
     const QString sampleDir = QStringLiteral(STACKS_SAMPLE_DIR);
-    if (!controller.initialize(sampleDir)) {
+    if (!controller.initialize(sampleDir, parser.value(dataOption))) {
         qCritical("Stacks failed to initialize its local library.");
         PdfDocument::globalShutdown();
         return 2;

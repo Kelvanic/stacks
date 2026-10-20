@@ -9,7 +9,6 @@ Item {
     property string label: ""
     property string icon: ""
     property bool primary: false
-    property bool enabled: true
     property bool active: false
     property int horizontalPadding: 14
 

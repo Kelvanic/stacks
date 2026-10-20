@@ -3,6 +3,7 @@
 #include <QObject>
 #include <QString>
 #include <QStringList>
+#include <QTimer>
 
 class QSslSocket;
 
@@ -23,6 +24,8 @@ public:
         QString user;
         QString password;
         QString kindleAddress;
+        bool implicitTls = false; // Also enabled automatically for port 465.
+        int timeoutMs = 30000;
     };
 
     explicit KindleSender(QObject *parent = nullptr);
@@ -37,33 +40,30 @@ signals:
     void finished(bool ok, const QString &message);
 
 private:
-    struct Step {
-        QStringList commands;   // one per round trip
-        QStringList expected;   // expected reply code for each command
-        bool payloadAfter = false; // the body follows the last command
-    };
+    enum class State { Idle, Greeting, Ehlo, StartTls, TlsHandshake, SecureEhlo,
+                       Auth, MailFrom, Recipient, Data, Body, Quit };
 
     void start();
     void onConnected();
     void onReadyRead();
+    void handleReply(int code);
+    void authenticate();
     void onSocketError();
     void fail(const QString &message);
     void finish(bool ok, const QString &message);
     void writeLine(const QString &line);
-    void sendNextCommand();
+    void command(State state, const QString &line);
     QString buildMessage(const QString &filePath, const QString &title, const QString &author) const;
 
     QSslSocket *m_socket = nullptr;
     Settings m_settings;
-    QString m_filePath;
-    QString m_title;
-    QString m_author;
-    QVector<Step> m_steps;
-    int m_step = 0;
-    int m_command = 0;
+    State m_state = State::Idle;
+    QTimer m_timeout;
+    QStringList m_replyLines;
+    int m_replyCode = 0;
+    QString m_message;
     bool m_busy = false;
-    bool m_encrypted = false;
-    bool m_expectBody = false;
+    bool m_deliveryAccepted = false;
 };
 
 } // namespace stacks

@@ -20,6 +20,7 @@ public:
         QString title;
         QString author;
         QString sourceFormat;
+        QString sourcePath;
         int pages = 0;     // source pages (PDF) or chapters
         int words = 0;
         qint64 bytes = 0;

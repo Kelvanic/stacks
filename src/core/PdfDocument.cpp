@@ -11,11 +11,14 @@
 #include <fpdfview.h>
 
 #include <algorithm>
+#include <mutex>
 
 namespace stacks {
 
 namespace {
 int s_pdfiumRefCount = 0;
+// PDFium requires process-wide serialization, even for different documents.
+std::recursive_mutex s_pdfiumMutex;
 
 QString pdfErrorText(unsigned long code)
 {
@@ -49,6 +52,7 @@ PdfDocument::~PdfDocument()
 
 void PdfDocument::globalInit()
 {
+    const std::lock_guard lock(s_pdfiumMutex);
     if (s_pdfiumRefCount++ == 0) {
         FPDF_LIBRARY_CONFIG config;
         config.version = 2;
@@ -61,12 +65,14 @@ void PdfDocument::globalInit()
 
 void PdfDocument::globalShutdown()
 {
+    const std::lock_guard lock(s_pdfiumMutex);
     if (s_pdfiumRefCount > 0 && --s_pdfiumRefCount == 0)
         FPDF_DestroyLibrary();
 }
 
 bool PdfDocument::load(const QString &path, QString *error)
 {
+    const std::lock_guard lock(s_pdfiumMutex);
     close();
 
     if (!QFileInfo::exists(path)) {
@@ -77,11 +83,13 @@ bool PdfDocument::load(const QString &path, QString *error)
     }
 
     globalInit();
+    m_libraryInitialized = true;
     m_document = FPDF_LoadDocument(path.toUtf8().constData(), nullptr);
     if (!m_document) {
         m_lastError = pdfErrorText(FPDF_GetLastError());
         if (error)
             *error = m_lastError;
+        close();
         return false;
     }
 
@@ -100,15 +108,21 @@ bool PdfDocument::load(const QString &path, QString *error)
 
 void PdfDocument::close()
 {
+    const std::lock_guard lock(s_pdfiumMutex);
     if (m_document) {
         FPDF_CloseDocument(static_cast<FPDF_DOCUMENT>(m_document));
         m_document = nullptr;
     }
     m_pageCount = 0;
+    if (m_libraryInitialized) {
+        globalShutdown();
+        m_libraryInitialized = false;
+    }
 }
 
 QSizeF PdfDocument::pageSize(int pageIndex) const
 {
+    const std::lock_guard lock(s_pdfiumMutex);
     if (!m_document || pageIndex < 0 || pageIndex >= m_pageCount)
         return {};
     FS_SIZEF size {};
@@ -119,6 +133,7 @@ QSizeF PdfDocument::pageSize(int pageIndex) const
 
 QImage PdfDocument::renderPage(int pageIndex, double scale) const
 {
+    const std::lock_guard lock(s_pdfiumMutex);
     if (!m_document || pageIndex < 0 || pageIndex >= m_pageCount)
         return {};
 
@@ -150,6 +165,7 @@ QImage PdfDocument::renderPage(int pageIndex, double scale) const
 
 QString PdfDocument::pageText(int pageIndex) const
 {
+    const std::lock_guard lock(s_pdfiumMutex);
     if (!m_document || pageIndex < 0 || pageIndex >= m_pageCount)
         return {};
 
@@ -181,6 +197,7 @@ QString PdfDocument::pageText(int pageIndex) const
 
 QString PdfDocument::textInRect(int pageIndex, const QRectF &pageRect) const
 {
+    const std::lock_guard lock(s_pdfiumMutex);
     if (!m_document || pageIndex < 0 || pageIndex >= m_pageCount || pageRect.isEmpty())
         return {};
 
@@ -195,13 +212,15 @@ QString PdfDocument::textInRect(int pageIndex, const QRectF &pageRect) const
     }
 
     const int capacity = 8192;
+    // Reader rectangles use top-left coordinates; PDF page space is bottom-left.
+    const double pageHeight = pageSize(pageIndex).height();
     QVector<unsigned short> buffer(capacity, 0);
     const int written = FPDFText_GetBoundedText(
         textPage,
         static_cast<double>(pageRect.left()),
-        static_cast<double>(pageRect.top()),
+        pageHeight - pageRect.top(),
         static_cast<double>(pageRect.right()),
-        static_cast<double>(pageRect.bottom()),
+        pageHeight - pageRect.bottom(),
         buffer.data(),
         capacity);
 
@@ -217,6 +236,7 @@ QString PdfDocument::textInRect(int pageIndex, const QRectF &pageRect) const
 
 QString PdfDocument::author() const
 {
+    const std::lock_guard lock(s_pdfiumMutex);
     if (!m_document)
         return {};
     const unsigned long length = FPDF_GetMetaText(static_cast<FPDF_DOCUMENT>(m_document), "Author", nullptr, 0);
@@ -233,6 +253,7 @@ QString PdfDocument::author() const
 
 QString PdfDocument::title() const
 {
+    const std::lock_guard lock(s_pdfiumMutex);
     if (!m_document)
         return {};
     const unsigned long length = FPDF_GetMetaText(static_cast<FPDF_DOCUMENT>(m_document), "Title", nullptr, 0);

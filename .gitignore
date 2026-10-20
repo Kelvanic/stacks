@@ -16,6 +16,7 @@ package-lock.json
 kindle.json
 voice/
 kindle/
+third_party/pdfium-local/
 
 # Editors and OS
 .DS_Store

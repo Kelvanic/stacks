@@ -2,35 +2,36 @@
 
 #include <QFile>
 #include <QFileInfo>
+#include <QMimeDatabase>
+#include <QRegularExpression>
 #include <QSslSocket>
-#include <QTextStream>
+#include <QUuid>
 
 namespace stacks {
-
 namespace {
 
-QString base64Chunked(const QByteArray &data)
+QString sanitizeHeader(QString value)
 {
-    const QByteArray encoded = data.toBase64();
-    QString out;
-    for (int i = 0; i < encoded.size(); i += 76)
-        out += QString::fromLatin1(encoded.mid(i, 76)) + QLatin1Char('\n');
-    return out;
+    value.replace(QLatin1Char('\r'), QLatin1Char(' '));
+    value.replace(QLatin1Char('\n'), QLatin1Char(' '));
+    return value.trimmed();
 }
 
-QString sanitizeHeader(const QString &value)
+bool validAddress(const QString &address)
 {
-    QString out = value;
-    out.replace(QLatin1Char('\r'), QLatin1Char(' '));
-    out.replace(QLatin1Char('\n'), QLatin1Char(' '));
-    return out.trimmed();
+    static const QRegularExpression email(QStringLiteral("^[^\\s<>@]+@[^\\s<>@]+$"));
+    return email.match(address).hasMatch();
 }
 
 } // namespace
 
-KindleSender::KindleSender(QObject *parent)
-    : QObject(parent)
+KindleSender::KindleSender(QObject *parent) : QObject(parent)
 {
+    m_timeout.setSingleShot(true);
+    connect(&m_timeout, &QTimer::timeout, this, [this]() {
+        finish(m_deliveryAccepted, m_deliveryAccepted ? QStringLiteral("Sent to Kindle.")
+                                                     : QStringLiteral("The mail server timed out."));
+    });
 }
 
 KindleSender::~KindleSender() = default;
@@ -38,102 +39,64 @@ KindleSender::~KindleSender() = default;
 void KindleSender::send(const Settings &settings, const QString &filePath,
                         const QString &title, const QString &author)
 {
-    if (m_busy) {
-        finish(false, QStringLiteral("A send is already in progress."));
-        return;
-    }
-    if (!QFileInfo::exists(filePath)) {
-        finish(false, QStringLiteral("The converted file is missing."));
-        return;
-    }
-    if (settings.kindleAddress.trimmed().isEmpty()) {
-        finish(false, QStringLiteral("Add your @kindle.com address first."));
-        return;
-    }
-    if (settings.smtpHost.trimmed().isEmpty() || settings.user.trimmed().isEmpty()) {
-        finish(false, QStringLiteral("Add your sending email and SMTP details first."));
-        return;
-    }
-
+    if (m_busy)
+        return; // Never abort an active transfer because of a duplicate request.
     m_settings = settings;
-    m_filePath = filePath;
-    m_title = title;
-    m_author = author;
-    m_busy = true;
-    m_step = 0;
-    m_command = 0;
-    m_encrypted = false;
-
-    m_steps.clear();
-
-    Step hello;
-    hello.commands = QStringList{QStringLiteral("EHLO stacks.local")};
-    hello.expected = QStringList{QStringLiteral("250")};
-    m_steps.append(hello);
-
-    if (settings.smtpPort == 465) {
-        m_encrypted = true;
-    } else {
-        Step startTls;
-        startTls.commands = QStringList{QStringLiteral("STARTTLS")};
-        startTls.expected = QStringList{QStringLiteral("220")};
-        m_steps.append(startTls);
-
-        Step helloAgain;
-        helloAgain.commands = QStringList{QStringLiteral("EHLO stacks.local")};
-        helloAgain.expected = QStringList{QStringLiteral("250")};
-        m_steps.append(helloAgain);
+    m_settings.fromAddress = settings.fromAddress.trimmed();
+    m_settings.kindleAddress = settings.kindleAddress.trimmed();
+    if (!validAddress(m_settings.fromAddress) || !validAddress(m_settings.kindleAddress)) {
+        finish(false, QStringLiteral("Add valid sending and Kindle email addresses first."));
+        return;
     }
-
-    Step auth;
-    const QString plain = QString::fromLatin1(
-        QByteArray("\0" + settings.user.toUtf8() + "\0" + settings.password.toUtf8()).toBase64());
-    auth.commands = QStringList{QStringLiteral("AUTH PLAIN %1").arg(plain)};
-    auth.expected = QStringList{QStringLiteral("235")};
-    m_steps.append(auth);
-
-    Step from;
-    from.commands = QStringList{QStringLiteral("MAIL FROM:<%1>").arg(settings.fromAddress.trimmed())};
-    from.expected = QStringList{QStringLiteral("250")};
-    m_steps.append(from);
-
-    Step to;
-    to.commands = QStringList{QStringLiteral("RCPT TO:<%1>").arg(settings.kindleAddress.trimmed())};
-    to.expected = QStringList{QStringLiteral("250")};
-    m_steps.append(to);
-
-    Step data;
-    data.commands = QStringList{QStringLiteral("DATA")};
-    data.expected = QStringList{QStringLiteral("354")};
-    data.payloadAfter = true;
-    m_steps.append(data);
-
-    Step quit;
-    quit.commands = QStringList{QStringLiteral("QUIT")};
-    quit.expected = QStringList{QStringLiteral("221")};
-    m_steps.append(quit);
-
+    if (settings.smtpHost.trimmed().isEmpty() || settings.user.isEmpty()
+        || settings.password.isEmpty() || settings.smtpPort < 1 || settings.smtpPort > 65535) {
+        finish(false, QStringLiteral("Add your SMTP host, port, user and app password first."));
+        return;
+    }
+    m_message = buildMessage(filePath, title, author);
+    if (m_message.isEmpty()) {
+        finish(false, QStringLiteral("The attachment could not be read."));
+        return;
+    }
+    m_busy = true;
+    m_deliveryAccepted = false;
+    m_state = State::Greeting;
+    m_replyCode = 0;
+    m_replyLines.clear();
     start();
 }
 
 void KindleSender::start()
 {
-    delete m_socket;
     m_socket = new QSslSocket(this);
-    m_socket->setPeerVerifyMode(QSslSocket::VerifyNone);
-
+    m_socket->setPeerVerifyMode(QSslSocket::VerifyPeer);
+    m_socket->setReadBufferSize(65536);
     connect(m_socket, &QSslSocket::connected, this, &KindleSender::onConnected);
     connect(m_socket, &QSslSocket::readyRead, this, &KindleSender::onReadyRead);
     connect(m_socket, &QSslSocket::encrypted, this, [this]() {
-        m_encrypted = true;
-        onReadyRead();
+        if (m_state == State::TlsHandshake)
+            command(State::SecureEhlo, QStringLiteral("EHLO stacks.local"));
+        else
+            onReadyRead(); // Implicit TLS: now wait for the server greeting.
+    });
+    connect(m_socket, &QSslSocket::sslErrors, this, [this](const QList<QSslError> &) {
+        fail(QStringLiteral("The mail server's TLS certificate could not be verified."));
     });
     connect(m_socket, &QSslSocket::errorOccurred, this, [this](QSslSocket::SocketError) {
         onSocketError();
     });
-
+    connect(m_socket, &QSslSocket::bytesWritten, this, [this](qint64) {
+        if (m_state == State::Body)
+            m_timeout.start(qMax(1, m_settings.timeoutMs));
+    });
+    connect(m_socket, &QSslSocket::disconnected, this, [this]() {
+        if (m_busy)
+            finish(m_deliveryAccepted, m_deliveryAccepted ? QStringLiteral("Sent to Kindle.")
+                                                         : QStringLiteral("The mail server disconnected."));
+    });
+    m_timeout.start(qMax(1, m_settings.timeoutMs));
     emit progress(QStringLiteral("Connecting to %1…").arg(m_settings.smtpHost));
-    if (m_settings.smtpPort == 465)
+    if (m_settings.implicitTls || m_settings.smtpPort == 465)
         m_socket->connectToHostEncrypted(m_settings.smtpHost, quint16(m_settings.smtpPort));
     else
         m_socket->connectToHost(m_settings.smtpHost, quint16(m_settings.smtpPort));
@@ -141,147 +104,201 @@ void KindleSender::start()
 
 void KindleSender::onConnected()
 {
-    emit progress(QStringLiteral("Connected. Handshaking…"));
+    emit progress(QStringLiteral("Connected. Waiting for the mail server…"));
 }
 
 void KindleSender::writeLine(const QString &line)
 {
-    if (!m_socket)
-        return;
-    const QByteArray data = line.toUtf8() + "\r\n";
-    m_socket->write(data);
+    m_timeout.start(qMax(1, m_settings.timeoutMs));
+    m_socket->write(line.toUtf8() + "\r\n");
 }
 
-void KindleSender::sendNextCommand()
+void KindleSender::command(State state, const QString &line)
 {
-    if (m_step >= m_steps.size()) {
-        finish(true, QStringLiteral("Sent to Kindle."));
-        return;
-    }
-    const Step &step = m_steps.at(m_step);
-    if (m_command < step.commands.size())
-        writeLine(step.commands.at(m_command));
+    m_state = state;
+    writeLine(line);
 }
 
 void KindleSender::onReadyRead()
 {
-    if (!m_socket || m_step >= m_steps.size())
+    if (!m_busy || !m_socket || m_state == State::TlsHandshake)
         return;
+    if ((m_settings.implicitTls || m_settings.smtpPort == 465) && !m_socket->isEncrypted())
+        return;
+    if (m_socket->bytesAvailable() > 8192 && !m_socket->canReadLine()) {
+        fail(QStringLiteral("The mail server returned an oversized reply."));
+        return;
+    }
+    while (m_busy && m_socket && m_socket->canReadLine()) {
+        const QByteArray raw = m_socket->readLine(8193);
+        if (raw.size() > 8192 || !raw.endsWith('\n')) {
+            fail(QStringLiteral("The mail server returned an oversized reply."));
+            return;
+        }
+        const QString line = QString::fromUtf8(raw).trimmed();
+        bool ok = false;
+        const int code = line.left(3).toInt(&ok);
+        if (!ok || line.size() < 3 || code < 200 || code > 599
+            || (line.size() > 3 && line.at(3) != QLatin1Char('-') && line.at(3) != QLatin1Char(' '))
+            || (m_replyCode != 0 && code != m_replyCode) || m_replyLines.size() >= 100) {
+            fail(QStringLiteral("The mail server returned an invalid reply."));
+            return;
+        }
+        m_timeout.start(qMax(1, m_settings.timeoutMs));
+        m_replyCode = code;
+        m_replyLines.append(line);
+        if (line.size() > 3 && line.at(3) == QLatin1Char('-'))
+            continue; // Wait for the final line of a multiline response.
+        handleReply(code);
+        m_replyCode = 0;
+        m_replyLines.clear();
+        if (m_state == State::TlsHandshake)
+            return;
+    }
+}
 
-    while (m_socket->canReadLine()) {
-        const QString line = QString::fromUtf8(m_socket->readLine()).trimmed();
-        if (line.isEmpty())
-            continue;
+void KindleSender::authenticate()
+{
+    if (!m_socket->isEncrypted()) {
+        fail(QStringLiteral("Refusing to send credentials without verified TLS."));
+        return;
+    }
+    bool supportsPlain = false;
+    for (const QString &line : m_replyLines) {
+        const QString capability = line.mid(4).toUpper();
+        if (capability.startsWith(QLatin1String("AUTH "))
+            && capability.split(QLatin1Char(' '), Qt::SkipEmptyParts).contains(QStringLiteral("PLAIN")))
+            supportsPlain = true;
+    }
+    if (!supportsPlain) {
+        fail(QStringLiteral("The mail server does not support AUTH PLAIN over TLS."));
+        return;
+    }
+    QByteArray credentials(1, '\0');
+    credentials += m_settings.user.toUtf8();
+    credentials += '\0';
+    credentials += m_settings.password.toUtf8();
+    command(State::Auth, QStringLiteral("AUTH PLAIN %1").arg(QString::fromLatin1(credentials.toBase64())));
+}
 
-        const Step &step = m_steps.at(m_step);
-        const QString expected = m_command < step.expected.size() ? step.expected.at(m_command) : QString();
-
-        if (m_expectBody) {
-            // The body was accepted; the server confirms with 250.
-            m_expectBody = false;
-            if (!line.startsWith(QLatin1String("250"))) {
-                fail(QStringLiteral("The mail server rejected the attachment: %1").arg(line));
+void KindleSender::handleReply(int code)
+{
+    int expected = 250;
+    if (m_state == State::Greeting || m_state == State::StartTls) expected = 220;
+    if (m_state == State::Auth) expected = 235;
+    if (m_state == State::Data) expected = 354;
+    if (m_state == State::Quit) expected = 221;
+    if (code != expected && !(m_state == State::Recipient && code == 251)) {
+        fail(QStringLiteral("The mail server rejected the request (SMTP %1).").arg(code));
+        return;
+    }
+    switch (m_state) {
+    case State::Greeting:
+        command(State::Ehlo, QStringLiteral("EHLO stacks.local"));
+        break;
+    case State::Ehlo:
+        if (m_socket->isEncrypted()) {
+            authenticate();
+        } else {
+            bool startTls = false;
+            for (const QString &line : m_replyLines)
+                startTls |= line.mid(4).trimmed().compare(QStringLiteral("STARTTLS"), Qt::CaseInsensitive) == 0;
+            if (!startTls) {
+                fail(QStringLiteral("The mail server does not offer STARTTLS. No credentials were sent."));
                 return;
             }
-            m_step += 1;
-            m_command = 0;
-            sendNextCommand();
-            return;
+            command(State::StartTls, QStringLiteral("STARTTLS"));
         }
-
-        if (line.startsWith(expected)) {
-            if (step.payloadAfter && m_command == step.commands.size() - 1) {
-                emit progress(QStringLiteral("Sending the file…"));
-                const QString message = buildMessage(m_filePath, m_title, m_author);
-                writeLine(message);
-                m_socket->write("\r\n.\r\n");
-                m_expectBody = true;
-                return;
-            }
-            m_command += 1;
-            if (m_command >= step.commands.size()) {
-                m_step += 1;
-                m_command = 0;
-            }
-            sendNextCommand();
-            return;
-        }
-
-        if (line.startsWith(QLatin1Char('2')) || line.startsWith(QLatin1Char('3')))
-            continue;
-
-        if (line.startsWith(QLatin1String("454"))) {
-            fail(QStringLiteral("Your Kindle address rejected the file. Check it in Amazon’s Personal Document Settings."));
-            return;
-        }
-        if (line.startsWith(QLatin1String("535"))
-            || line.startsWith(QLatin1String("530"))
-            || line.startsWith(QLatin1String("550"))) {
-            fail(QStringLiteral("The mail server refused the login. Check your email, app password and SMTP host."));
-            return;
-        }
-        fail(QStringLiteral("The mail server said: %1").arg(line));
-        return;
+        break;
+    case State::StartTls:
+        m_state = State::TlsHandshake;
+        m_socket->startClientEncryption();
+        break;
+    case State::SecureEhlo:
+        authenticate();
+        break;
+    case State::Auth:
+        command(State::MailFrom, QStringLiteral("MAIL FROM:<%1>").arg(m_settings.fromAddress));
+        break;
+    case State::MailFrom:
+        command(State::Recipient, QStringLiteral("RCPT TO:<%1>").arg(m_settings.kindleAddress));
+        break;
+    case State::Recipient:
+        command(State::Data, QStringLiteral("DATA"));
+        break;
+    case State::Data: {
+        emit progress(QStringLiteral("Sending the file…"));
+        QString message = m_message;
+        message.replace(QStringLiteral("\r\n."), QStringLiteral("\r\n.."));
+        if (message.startsWith(QLatin1Char('.')))
+            message.prepend(QLatin1Char('.'));
+        m_state = State::Body;
+        m_socket->write(message.toUtf8() + ".\r\n");
+        break;
+    }
+    case State::Body:
+        m_deliveryAccepted = true;
+        command(State::Quit, QStringLiteral("QUIT"));
+        break;
+    case State::Quit:
+        finish(true, QStringLiteral("Sent to Kindle."));
+        break;
+    default:
+        fail(QStringLiteral("Unexpected SMTP reply."));
     }
 }
 
 void KindleSender::onSocketError()
 {
-    if (!m_busy)
-        return;
-    fail(QStringLiteral("Mail error: %1").arg(m_socket ? m_socket->errorString() : QStringLiteral("unknown")));
+    if (m_busy)
+        finish(m_deliveryAccepted, m_deliveryAccepted ? QStringLiteral("Sent to Kindle.")
+               : QStringLiteral("Mail error: %1").arg(m_socket->errorString()));
 }
 
-void KindleSender::fail(const QString &message)
-{
-    finish(false, message);
-}
+void KindleSender::fail(const QString &message) { finish(false, message); }
 
 void KindleSender::finish(bool ok, const QString &message)
 {
     m_busy = false;
+    m_state = State::Idle;
+    m_timeout.stop();
     if (m_socket) {
-        m_socket->abort();
-        m_socket->deleteLater();
+        QSslSocket *socket = m_socket;
         m_socket = nullptr;
+        socket->disconnect(this);
+        socket->abort();
+        socket->deleteLater();
     }
+    m_message.clear();
+    m_settings.password.clear();
     emit finished(ok, message);
 }
 
-QString KindleSender::buildMessage(const QString &filePath, const QString &title,
-                                   const QString &author) const
+QString KindleSender::buildMessage(const QString &filePath, const QString &title, const QString &author) const
 {
     QFile file(filePath);
-    QByteArray payload;
-    if (file.open(QIODevice::ReadOnly))
-        payload = file.readAll();
-    file.close();
-
-    const QString name = QFileInfo(filePath).fileName();
-    const QString boundary = QStringLiteral("----=_StacksKindle");
-
-    QString message;
-    message += QStringLiteral("From: %1\r\n").arg(sanitizeHeader(m_settings.fromAddress));
-    message += QStringLiteral("To: %1\r\n").arg(sanitizeHeader(m_settings.kindleAddress));
-    message += QStringLiteral("Subject: %1\r\n").arg(sanitizeHeader(title));
-    message += QStringLiteral("MIME-Version: 1.0\r\n");
-    message += QStringLiteral("Content-Type: multipart/mixed; boundary=\"%1\"\r\n\r\n").arg(boundary);
-
-    message += QStringLiteral("--%1\r\n").arg(boundary);
-    message += QStringLiteral("Content-Type: text/plain; charset=utf-8\r\n\r\n");
-    message += QStringLiteral("Converted with Stacks.\r\n");
-    if (!author.isEmpty())
-        message += QStringLiteral("%1 — %2\r\n").arg(title, author);
-    message += QStringLiteral("\r\n");
-
-    message += QStringLiteral("--%1\r\n").arg(boundary);
-    message += QStringLiteral("Content-Type: application/epub+zip; name=\"%1\"\r\n").arg(name);
-    message += QStringLiteral("Content-Transfer-Encoding: base64\r\n");
-    message += QStringLiteral("Content-Disposition: attachment; filename=\"%1\"\r\n\r\n").arg(name);
-    message += base64Chunked(payload);
-    message += QStringLiteral("\r\n--%1--\r\n").arg(boundary);
-
-    return message;
+    if (!file.open(QIODevice::ReadOnly))
+        return {};
+    const QByteArray payload = file.readAll();
+    if (file.error() != QFile::NoError)
+        return {};
+    QString name = sanitizeHeader(QFileInfo(filePath).fileName());
+    name.replace(QLatin1Char('"'), QLatin1Char('_'));
+    name.replace(QLatin1Char('\\'), QLatin1Char('_'));
+    const QString boundary = QStringLiteral("----Stacks-%1").arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
+    QString message = QStringLiteral("From: %1\r\nTo: %2\r\nSubject: =?UTF-8?B?%3?=\r\n"
+                                     "MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"%4\"\r\n\r\n")
+                          .arg(m_settings.fromAddress, m_settings.kindleAddress,
+                               QString::fromLatin1(sanitizeHeader(title).toUtf8().toBase64()), boundary);
+    message += QStringLiteral("--%1\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nConverted with Stacks.\r\n%2 — %3\r\n\r\n")
+                   .arg(boundary, sanitizeHeader(title), sanitizeHeader(author));
+    const QString mime = QMimeDatabase().mimeTypeForFile(filePath).name();
+    message += QStringLiteral("--%1\r\nContent-Type: %2; name=\"%3\"\r\nContent-Transfer-Encoding: base64\r\n"
+                              "Content-Disposition: attachment; filename=\"%3\"\r\n\r\n").arg(boundary, mime, name);
+    const QByteArray encoded = payload.toBase64();
+    for (qsizetype i = 0; i < encoded.size(); i += 76)
+        message += QString::fromLatin1(encoded.mid(i, 76)) + QStringLiteral("\r\n");
+    return message + QStringLiteral("\r\n--%1--\r\n").arg(boundary);
 }
 
 } // namespace stacks
