@@ -1,6 +1,16 @@
-cmake_minimum_required(VERSION 3.21)
+cmake_minimum_required(VERSION 3.21.1)
 
-project(Stacks VERSION 0.1.0 LANGUAGES CXX)
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION.txt" STACKS_DEFAULT_VERSION LIMIT_COUNT 1)
+set(STACKS_VERSION "${STACKS_DEFAULT_VERSION}" CACHE STRING "Numeric package version")
+set(STACKS_DISPLAY_VERSION "${STACKS_VERSION}" CACHE STRING "Application/release version, including prerelease suffix")
+project(Stacks VERSION ${STACKS_VERSION} LANGUAGES CXX)
+option(STACKS_BUNDLED_RESOURCES "Embed the UI, fonts, textures and artwork for relocatable packages" ON)
+if(MSVC)
+    add_compile_options(/utf-8 /Zc:__cplusplus)
+endif()
+if(WIN32)
+    add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -119,8 +129,26 @@ if(APPLE)
             "$<TARGET_FILE:stacks>" "${CMAKE_CURRENT_BINARY_DIR}/stacks"
     )
 endif()
+if(STACKS_BUNDLED_RESOURCES)
+    file(GLOB STACKS_UI_FILES CONFIGURE_DEPENDS "qml/*.qml" "qml/*.js")
+    file(GLOB STACKS_FONT_FILES CONFIGURE_DEPENDS "assets/fonts/*")
+    file(GLOB STACKS_TEXTURE_FILES CONFIGURE_DEPENDS "assets/textures/*")
+    qt_add_resources(stacks "stacks_ui"
+        PREFIX "/stacks"
+        BASE "${CMAKE_CURRENT_SOURCE_DIR}"
+        FILES ${STACKS_UI_FILES} ${STACKS_FONT_FILES} ${STACKS_TEXTURE_FILES}
+              qml/qmldir assets/branding/stacks-icon.png
+    )
+    target_compile_definitions(stacks PRIVATE STACKS_BUNDLED_RESOURCES)
+endif()
+if(WIN32)
+    set_target_properties(stacks PROPERTIES WIN32_EXECUTABLE TRUE)
+    configure_file(cmake/Stacks.rc.in "${CMAKE_CURRENT_BINARY_DIR}/Stacks.rc" @ONLY)
+    target_sources(stacks PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/Stacks.rc")
+endif()
 target_link_libraries(stacks PRIVATE stacks_native Qt6::Quick Qt6::QuickControls2 Qt6::Gui)
 target_compile_definitions(stacks PRIVATE
+    STACKS_APP_VERSION="${STACKS_DISPLAY_VERSION}"
     STACKS_QML_DIR="${CMAKE_CURRENT_SOURCE_DIR}/qml"
     STACKS_ASSETS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets"
     STACKS_SAMPLE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets/samples"
@@ -128,6 +156,7 @@ target_compile_definitions(stacks PRIVATE
 set_target_properties(stacks PROPERTIES
     BUILD_RPATH "${PDFIUM_LIBRARY_DIR}"
 )
+include(cmake/Packaging.cmake)
 
 if(WIN32)
     add_custom_command(TARGET stacks POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different

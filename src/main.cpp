@@ -6,6 +6,7 @@
 #include <QCommandLineParser>
 #include <QDir>
 #include <QFontDatabase>
+#include <QFileInfo>
 #include <QGuiApplication>
 #include <QIcon>
 #include <QQmlApplicationEngine>
@@ -22,7 +23,11 @@ namespace {
 
 void loadFonts()
 {
+#ifdef STACKS_BUNDLED_RESOURCES
+    const QString fontDir = QStringLiteral(":/stacks/assets/fonts");
+#else
     const QString fontDir = QStringLiteral(STACKS_ASSETS_DIR "/fonts");
+#endif
     const QStringList fonts = {
         QStringLiteral("Inter.ttf"),
         QStringLiteral("Newsreader.ttf"),
@@ -34,6 +39,22 @@ void loadFonts()
     QFont defaultFont(QStringLiteral("Inter"));
     defaultFont.setPointSizeF(13.0);
     QGuiApplication::setFont(defaultFont);
+}
+
+QString sampleDirectory()
+{
+    const QDir executableDir(QCoreApplication::applicationDirPath());
+    for (const QString &relative : {QStringLiteral("../Resources/samples"),
+                                   QStringLiteral("resources/samples"),
+                                   QStringLiteral("../share/stacks/samples")}) {
+        const QString path = executableDir.absoluteFilePath(relative);
+        if (QFileInfo(path).isDir())
+            return path;
+    }
+    // Development builds can still use the checkout. Package smoke tests
+    // explicitly forbid this fallback, so missing installed data cannot hide.
+    return qEnvironmentVariableIsSet("STACKS_REQUIRE_BUNDLED_RESOURCES")
+        ? QString() : QStringLiteral(STACKS_SAMPLE_DIR);
 }
 
 } // namespace
@@ -48,7 +69,7 @@ int main(int argc, char *argv[])
     QCoreApplication::setOrganizationName(QStringLiteral("Stacks"));
     QCoreApplication::setOrganizationDomain(QStringLiteral("stacks.local"));
     QCoreApplication::setApplicationName(QStringLiteral("Stacks"));
-    QCoreApplication::setApplicationVersion(QStringLiteral("0.1.0"));
+    QCoreApplication::setApplicationVersion(QStringLiteral(STACKS_APP_VERSION));
 
     app.setWindowIcon(QIcon(QStringLiteral(":/branding/stacks-icon.png")));
     app.setApplicationDisplayName(QStringLiteral("Stacks"));
@@ -97,7 +118,7 @@ int main(int argc, char *argv[])
     parser.addOption(diagramOption);
     parser.process(app);
 
-    const QString sampleDir = QStringLiteral(STACKS_SAMPLE_DIR);
+    const QString sampleDir = sampleDirectory();
     if (!controller.initialize(sampleDir, parser.value(dataOption))) {
         qCritical("Stacks failed to initialize its local library.");
         PdfDocument::globalShutdown();
@@ -175,8 +196,13 @@ int main(int argc, char *argv[])
 
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("controller"), &controller);
+#ifdef STACKS_BUNDLED_RESOURCES
+    engine.rootContext()->setContextProperty(QStringLiteral("assetsDir"), QStringLiteral("qrc:/stacks/assets"));
+    engine.load(QUrl(QStringLiteral("qrc:/stacks/qml/Main.qml")));
+#else
     engine.rootContext()->setContextProperty(QStringLiteral("assetsDir"), QString(STACKS_ASSETS_DIR));
     engine.load(QUrl::fromLocalFile(QStringLiteral(STACKS_QML_DIR "/Main.qml")));
+#endif
 
     if (engine.rootObjects().isEmpty()) {
         qCritical("Stacks could not load its QML interface.");

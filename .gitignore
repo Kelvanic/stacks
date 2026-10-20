@@ -1,6 +1,8 @@
 # Build output
 build/
 build-*/
+dist/
+__pycache__/
 cmake-build-*/
 compile_commands.json
 

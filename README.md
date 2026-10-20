@@ -121,6 +121,15 @@ Fonts are already checked in under `assets/fonts/` (SIL Open Font License).
 
 ---
 
+## Desktop downloads and CI
+
+The [build and release workflow](.github/workflows/build-release.yml) produces
+macOS Apple Silicon/Intel DMGs and ZIPs, Windows x64 installer/portable packages,
+and Linux x64 AppImage/DEB/tar.gz packages. Every platform runs the core tests
+and relocated-package smoke checks before publishing a version tag (`v0.1.0`,
+for example). See [packaging/README.md](packaging/README.md) for release commands,
+OS baselines, checksums and the unsigned/not-notarized signing limitations.
+
 ## Build
 
 ```bash
@@ -284,8 +293,10 @@ The prototype is structured to hit these on Linux/Windows/macOS hardware. The ma
 Stacks now has generated book-stack artwork in the sidebar, on the home screen,
 and as its native application icon. On macOS, CMake creates `build/stacks.app`;
 open it with `open build/stacks.app`. The `./build/stacks` command remains available
-for CLI use. This development bundle loads the checkout's QML, fonts, and sample
-assets and uses build-local dependencies; it is not a distributable installer.
+for CLI use. QML, fonts, textures and artwork are embedded by default; development builds
+can still use checkout sample books and build-local dependencies. Use the
+packaging workflow to bundle the runtime and create distributable downloads.
+Configure `-DSTACKS_BUNDLED_RESOURCES=OFF` only for live QML editing.
 
 The library workspace includes a continue-reading feature, live book counts,
 sidebar navigation for All books / In progress / Finished, title-and-author

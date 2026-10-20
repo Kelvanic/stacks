@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Stacks
+Comment=A local-first reading desk for PDF and EPUB
+Exec=stacks
+Icon=stacks
+Terminal=false
+Categories=Office;Viewer;
+StartupWMClass=Stacks
