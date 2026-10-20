@@ -66,6 +66,13 @@ and install/launch/uninstall the Windows installer. The tests are headless
 software-rendered checks, not a substitute for testing real GPU/audio devices
 or every supported OS release.
 
+Installer smoke tests pass NSIS's special `/D=` tail unquoted and last (as required
+by NSIS, even for paths containing spaces), then require the app and uninstaller
+at that exact destination. Each payload gets a fresh sample-library database.
+DMG verification retries only the exact observed resource-unavailable diagnostic,
+up to three times with 2s/5s delays; unknown/corrupt/changed images still fail.
+Screenshots, installer paths and DMG attempt logs survive failed checks.
+
 ## Signing
 
 No publisher credentials are required. macOS bundles use an ad-hoc signature,

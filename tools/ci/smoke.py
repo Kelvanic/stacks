@@ -1,5 +1,7 @@
 """Extract and launch the actual distribution with SDK environment removed."""
 import argparse
+from contextlib import contextmanager
+import json
 import os
 from pathlib import Path
 import re
@@ -10,6 +12,27 @@ import tempfile
 import zipfile
 from dependencies import ROOT
 from package import TARGETS, version_parts
+from verification import nsis_install_command, verify_dmg
+
+
+@contextmanager
+def preserve_smoke_screenshots(work):
+    failed = False
+    try:
+        yield
+    except BaseException:
+        failed = True
+        raise
+    finally:
+        try:
+            screenshots = ROOT / "build" / "package-smoke"
+            screenshots.mkdir(parents=True, exist_ok=True)
+            for png in work.glob("*.png"):
+                shutil.copy2(png, screenshots)
+        except Exception as error:
+            if not failed:
+                raise
+            print(f"Unable to preserve smoke screenshots: {error}", flush=True)
 
 
 def isolated_environment():
@@ -30,7 +53,9 @@ def isolated_environment():
 
 def smoke(executable, work, version):
     env = isolated_environment()
-    library = work / "test library"
+    # Each payload (ZIP, installed app, AppImage) must seed its own database.
+    # Reusing the ZIP's DB could mask missing sample resources in the installer.
+    library = Path(tempfile.mkdtemp(prefix="test library ", dir=work))
     def invoke(*arguments):
         command = [str(executable), "--data-dir", str(library), *map(str, arguments)]
         result = subprocess.run(command, cwd=work, env=env, text=True, stdout=subprocess.PIPE,
@@ -60,7 +85,7 @@ def smoke(executable, work, version):
 def test_package(out, target, version):
     version_parts(version)
     name = f"Stacks-{version}-{TARGETS[target]}"
-    with tempfile.TemporaryDirectory(prefix="stacks-package-") as directory:
+    with tempfile.TemporaryDirectory(prefix="stacks-package-") as directory, preserve_smoke_screenshots(Path(directory) / "Package With Spaces"):
         work = Path(directory) / "Package With Spaces"
         work.mkdir()
         if target.startswith("mac"):
@@ -84,21 +109,42 @@ def test_package(out, target, version):
             smoke(appimage, work, version)
             subprocess.run(["dpkg-deb", "--info", str(out / f"{name}.deb")], check=True)
         elif target.startswith("mac"):
-            subprocess.run(["hdiutil", "verify", str(out / f"{name}.dmg")], check=True)
+            verify_dmg(out / f"{name}.dmg", ROOT / "build/package-smoke")
         elif target.startswith("win"):
             # Also verify the actual installer payload, not just the ZIP.
             install = work / "Installed Stacks"
-            process = subprocess.run([str(out / f"{name}-setup.exe"), "/S", f"/D={install}"], timeout=180)
-            if process.returncode:
-                raise RuntimeError("Silent installer failed")
+            command = nsis_install_command(out / f"{name}-setup.exe", install)
+            process = subprocess.run(command, shell=False, timeout=180)
+            diagnostics = ROOT / "build/package-smoke"
+            diagnostics.mkdir(parents=True, exist_ok=True)
+            report = {"command": command, "exit_code": process.returncode,
+                      "requested_directory": str(install),
+                      "files": sorted(str(path.relative_to(install)) for path in install.rglob("*"))[:1000]}
+            (diagnostics / "installer.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+            uninstaller = install / "Uninstall.exe"
+            failed = False
             try:
+                if process.returncode:
+                    raise RuntimeError(f"Silent installer failed ({process.returncode})")
+                if not (install / "stacks.exe").is_file() or not uninstaller.is_file():
+                    raise RuntimeError(f"Installer did not produce the expected app and uninstaller in {install}; see installer.json")
                 smoke(install / "stacks.exe", work, version)
+            except BaseException:
+                failed = True
+                raise
             finally:
-                subprocess.run([str(install / "Uninstall.exe"), "/S"], timeout=120, check=True)
-        screenshots = ROOT / "build" / "package-smoke"
-        screenshots.mkdir(parents=True, exist_ok=True)
-        for png in work.glob("*.png"):
-            shutil.copy2(png, screenshots)
+                # Preserve the original installation/app failure even if cleanup
+                # fails too, and never try to run a nonexistent uninstaller.
+                if uninstaller.is_file():
+                    try:
+                        subprocess.run([str(uninstaller), "/S"], timeout=120, check=True)
+                    except Exception as error:
+                        try:
+                            (diagnostics / "uninstall-error.log").write_text(repr(error), encoding="utf-8")
+                        except Exception as log_error:
+                            print(f"Unable to preserve uninstall diagnostics: {log_error}", flush=True)
+                        if not failed:
+                            raise
 
 
 if __name__ == "__main__":
