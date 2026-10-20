@@ -1,0 +1,31 @@
+# Build output
+build/
+build-*/
+cmake-build-*/
+compile_commands.json
+
+# Leftovers from earlier experiments in this folder
+node_modules/
+.venv/
+package.json
+package-lock.json
+
+# Local data and secrets — never commit a library or credentials
+*.db
+*.db-journal
+kindle.json
+voice/
+kindle/
+
+# Editors and OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.user
+*.swp
+*~
+
+# Stray backup files from archives
+*.orig
+*.rej
