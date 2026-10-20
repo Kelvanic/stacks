@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from dependencies import LOCK, download
-from package import version_parts, uninstall_commands, nsis_escape
+from package import version_parts, uninstall_commands, nsis_escape, is_macho
 from smoke import isolated_environment
 from verify_release import expected_assets, verify
 
@@ -48,6 +48,17 @@ class PackagingTests(unittest.TestCase):
             self.assertIn('RMDir "$INSTDIR\\resources"', commands)
             self.assertNotIn("/r", commands)
         self.assertEqual(nsis_escape('$"'), '$$$\\"')
+
+    def test_macho_detection_does_not_spawn_processes_for_qml_assets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / "library"
+            binary.write_bytes(bytes.fromhex("cffaedfe") + b"binary")
+            self.assertTrue(is_macho(binary))
+            qml = root / "ui.qml"
+            qml.write_text("import QtQuick")
+            self.assertFalse(is_macho(qml))
+            self.assertFalse(is_macho(root))
 
     def test_sdk_environment_is_removed(self):
         with patch.dict("os.environ", {"QT_PLUGIN_PATH": "fake-sdk", "LD_LIBRARY_PATH": "fake-sdk", "QML_IMPORT_PATH": "fake-sdk"}):

@@ -28,7 +28,17 @@ git push origin v0.1.0
 A tag `vMAJOR.MINOR.PATCH` (optionally `-rc.1`, `-beta.1`, etc.) supplies the
 application version, bundle/installer metadata, and download names.
 `VERSION.txt` supplies the default for non-tag CI and local builds. Prerelease
-tags publish prereleases. Manual runs on branches build artifacts only.
+tags publish prereleases. Manual runs build artifacts only unless the **publish**
+checkbox is explicitly selected on `main`:
+
+```bash
+gh workflow run build-release.yml --ref main -f publish=true
+```
+
+That single run builds/tests all targets, then creates `v<VERSION.txt>` at the
+exact tested commit and publishes the downloads. It refuses to reuse a version
+tag pointing to a different commit. The tag is created with the workflow token,
+so it does not recursively trigger another tag build.
 
 The release job runs only when **all four** matrix jobs pass their tests and
 package smoke checks. It verifies the nine expected packages and all individual

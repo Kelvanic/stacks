@@ -58,6 +58,14 @@ def write_build_info(data_dir, target, version, qt):
     (data_dir / "BUILD_INFO.json").write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8")
 
 
+def is_macho(path):
+    if path.is_symlink() or not path.is_file():
+        return False
+    with path.open("rb") as source:
+        magic = source.read(4)
+    return magic in {bytes.fromhex(value) for value in ("feedface", "feedfacf", "cefaedfe", "cffaedfe", "cafebabe", "bebafeca", "cafebabf", "bfbafeca")}
+
+
 def mac_package(stage, out, name, qt):
     app = stage / "stacks.app"
     run(qt / "bin" / "macdeployqt", app, f"-qmldir={ROOT / 'qml'}", "-always-overwrite", "-no-strip", "-verbose=2")
@@ -70,7 +78,7 @@ def mac_package(stage, out, name, qt):
     binaries = []
     replacements = {}
     for path in app.rglob("*"):
-        if path.is_file() and not path.is_symlink() and "Mach-O" in subprocess.check_output(["file", "-b", str(path)], text=True):
+        if is_macho(path):
             binaries.append(path)
             if path.parent == app / "Contents/Frameworks" and path.suffix == ".dylib":
                 identity = subprocess.check_output(["otool", "-D", str(path)], text=True).splitlines()
@@ -90,9 +98,7 @@ def mac_package(stage, out, name, qt):
     run("codesign", "--verify", "--deep", "--strict", app)
     # Fail if any bundled binary still loads a dependency from Homebrew/the SDK.
     for path in app.rglob("*"):
-        if not path.is_file() or path.is_symlink():
-            continue
-        if "Mach-O" not in subprocess.check_output(["file", "-b", str(path)], text=True):
+        if not is_macho(path):
             continue
         identity = subprocess.check_output(["otool", "-D", str(path)], text=True).splitlines()[1:]
         deps = subprocess.check_output(["otool", "-L", str(path)], text=True).splitlines()[1:]
