@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from dependencies import LOCK, download
-from package import version_parts, uninstall_commands, nsis_escape, is_macho
+from package import version_parts, uninstall_commands, nsis_escape, is_macho, macho_dependencies
 from smoke import isolated_environment
 from verify_release import expected_assets, verify
 
@@ -59,6 +59,10 @@ class PackagingTests(unittest.TestCase):
             qml.write_text("import QtQuick")
             self.assertFalse(is_macho(qml))
             self.assertFalse(is_macho(root))
+
+    def test_universal_macho_headers_are_not_dependencies(self):
+        output = '/tmp/QtCore (architecture x86_64):\n\t@rpath/QtCore (compatibility version 6.0)\n/tmp/QtCore (architecture arm64):\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0)\n'
+        self.assertEqual(macho_dependencies(output), ['@rpath/QtCore', '/usr/lib/libSystem.B.dylib'])
 
     def test_sdk_environment_is_removed(self):
         with patch.dict("os.environ", {"QT_PLUGIN_PATH": "fake-sdk", "LD_LIBRARY_PATH": "fake-sdk", "QML_IMPORT_PATH": "fake-sdk"}):

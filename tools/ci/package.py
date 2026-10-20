@@ -66,6 +66,11 @@ def is_macho(path):
     return magic in {bytes.fromhex(value) for value in ("feedface", "feedfacf", "cefaedfe", "cffaedfe", "cafebabe", "bebafeca", "cafebabf", "bfbafeca")}
 
 
+def macho_dependencies(output):
+    # Universal binaries have a separate non-indented heading per architecture.
+    return [line.strip().split(" (", 1)[0] for line in output.splitlines() if line[:1].isspace()]
+
+
 def mac_package(stage, out, name, qt):
     app = stage / "stacks.app"
     run(qt / "bin" / "macdeployqt", app, f"-qmldir={ROOT / 'qml'}", "-always-overwrite", "-no-strip", "-verbose=2")
@@ -88,9 +93,8 @@ def mac_package(stage, out, name, qt):
                     replacements[identity[1].strip()] = new_id
                 run("install_name_tool", "-id", new_id, path)
     for path in binaries:
-        deps = subprocess.check_output(["otool", "-L", str(path)], text=True).splitlines()[1:]
-        for line in deps:
-            old = line.strip().split(" (", 1)[0]
+        deps = macho_dependencies(subprocess.check_output(["otool", "-L", str(path)], text=True))
+        for old in deps:
             if old in replacements and old != replacements[old]:
                 run("install_name_tool", "-change", old, replacements[old], path)
     app = app.rename(stage / "Stacks.app")
@@ -101,9 +105,8 @@ def mac_package(stage, out, name, qt):
         if not is_macho(path):
             continue
         identity = subprocess.check_output(["otool", "-D", str(path)], text=True).splitlines()[1:]
-        deps = subprocess.check_output(["otool", "-L", str(path)], text=True).splitlines()[1:]
-        for line in deps:
-            dependency = line.strip().split(" (", 1)[0]
+        deps = macho_dependencies(subprocess.check_output(["otool", "-L", str(path)], text=True))
+        for dependency in deps:
             if dependency in identity: # A dylib's own ID is not a loaded dependency.
                 continue
             if dependency.startswith("/") and not dependency.startswith(("/System/Library/", "/usr/lib/")):
